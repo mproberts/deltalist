@@ -109,11 +109,19 @@ internal class TrackedMutableList<T>(
     override fun subList(fromIndex: Int, toIndex: Int): MutableList<T> =
         backing.subList(fromIndex, toIndex)
 
+    fun move(fromIndex: Int, toIndex: Int) {
+        if (fromIndex == toIndex) return
+        val item = backing.removeAt(fromIndex)
+        backing.add(toIndex, item)
+        operations.add(TrackedOperation.Move(fromIndex, toIndex))
+    }
+
     fun toMutations(): List<Mutation> = operations.map { op ->
         when (op) {
             is TrackedOperation.Add -> Mutation.Insert(op.index, op.count)
             is TrackedOperation.Remove -> Mutation.Remove(op.index, op.count)
             is TrackedOperation.Update -> Mutation.Update(op.index)
+            is TrackedOperation.Move -> Mutation.Move(op.fromIndex, op.toIndex)
         }
     }
 
@@ -124,4 +132,5 @@ private sealed class TrackedOperation {
     data class Add(val index: Int, val count: Int) : TrackedOperation()
     data class Remove(val index: Int, val count: Int) : TrackedOperation()
     data class Update(val index: Int) : TrackedOperation()
+    data class Move(val fromIndex: Int, val toIndex: Int) : TrackedOperation()
 }

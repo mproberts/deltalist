@@ -62,9 +62,16 @@ internal class MutableDeltaFlowImpl<T>(
 
     override fun set(index: Int, item: T) = update { it[index] = item }
 
-    override fun move(fromIndex: Int, toIndex: Int) = update {
-        val item = it.removeAt(fromIndex)
-        it.add(toIndex, item)
+    override fun move(fromIndex: Int, toIndex: Int) {
+        val tracked = TrackedMutableList(state.value.items)
+        tracked.move(fromIndex, toIndex)
+
+        val mutations = tracked.toMutations()
+        if (mutations.isEmpty()) {
+            return
+        }
+
+        state.value = Delta(tracked.toList(), Change.Mutations(mutations))
     }
 
     override fun clear() = update { it.clear() }

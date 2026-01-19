@@ -6,14 +6,31 @@ import com.latenighthack.deltalist.DeltaFlow
 import com.latenighthack.deltalist.Mutation
 import kotlinx.coroutines.flow.flow
 
+/**
+ * Lazy filtered list that only accesses source items when get() is called.
+ * The filteredIndices list maps from filtered index to source index.
+ */
+internal class FilteredList<T>(
+    private val source: List<T>,
+    private val filteredIndices: List<Int>
+) : AbstractList<T>() {
+    override val size: Int get() = filteredIndices.size
+
+    override fun get(index: Int): T = source[filteredIndices[index]]
+}
+
 fun <T> DeltaFlow<T>.filterItems(predicate: (T) -> Boolean): DeltaFlow<T> = flow {
     var previousFilteredIndices: Set<Int> = emptySet()
     var previousSourceItems: List<T> = emptyList()
 
     collect { delta ->
         val sourceItems = delta.items
-        val currentFilteredIndices = sourceItems.indices.filter { predicate(sourceItems[it]) }.toSet()
-        val filteredItems = currentFilteredIndices.map { sourceItems[it] }
+
+        // Build the set of source indices that pass the filter
+        // Note: We need to check each item to know if it passes the filter,
+        // but we defer accessing the actual item values until get() is called
+        val currentFilteredIndices = buildFilteredIndices(sourceItems, predicate)
+        val filteredIndicesList = currentFilteredIndices.sorted()
 
         val change = when (delta.change) {
             is Change.Reload -> Change.Reload
@@ -37,8 +54,24 @@ fun <T> DeltaFlow<T>.filterItems(predicate: (T) -> Boolean): DeltaFlow<T> = flow
 
         previousSourceItems = sourceItems
         previousFilteredIndices = currentFilteredIndices
-        emit(Delta(filteredItems, change))
+
+        // Use lazy filtered list - items are only accessed when get() is called
+        emit(Delta(FilteredList(sourceItems, filteredIndicesList), change))
     }
+}
+
+/**
+ * Builds the set of source indices that pass the filter.
+ * This needs to check each item but is unavoidable for filtering.
+ */
+private fun <T> buildFilteredIndices(source: List<T>, predicate: (T) -> Boolean): Set<Int> {
+    val result = mutableSetOf<Int>()
+    for (i in source.indices) {
+        if (predicate(source[i])) {
+            result.add(i)
+        }
+    }
+    return result
 }
 
 private fun <T> translateMutations(

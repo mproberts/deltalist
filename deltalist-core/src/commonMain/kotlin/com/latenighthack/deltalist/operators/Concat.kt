@@ -4,13 +4,24 @@ import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaFlow
 import com.latenighthack.deltalist.Mutation
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.map
+
+/**
+ * Lazy list that concatenates two lists without accessing items until needed.
+ */
+internal class ConcatenatedList<T>(
+    private val first: List<T>,
+    private val second: List<T>
+) : AbstractList<T>() {
+    override val size: Int get() = first.size + second.size
+
+    override fun get(index: Int): T =
+        if (index < first.size) first[index] else second[index - first.size]
+}
 
 fun <T> DeltaFlow<T>.concat(other: DeltaFlow<T>): DeltaFlow<T> = combine(this, other) { first, second ->
-    val combinedItems = first.items + second.items
+    val combinedItems = ConcatenatedList(first.items, second.items)
 
     val change = when {
         first.change is Change.Reload || second.change is Change.Reload -> Change.Reload

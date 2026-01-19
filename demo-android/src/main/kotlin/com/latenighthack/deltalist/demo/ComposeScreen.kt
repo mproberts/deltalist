@@ -25,7 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
-import com.latenighthack.deltalist.LazyAccess
+import com.latenighthack.deltalist.StableLazyAccess
 
 @Composable
 fun ComposeScreen(viewModel: DemoViewModel) {
@@ -58,11 +58,11 @@ fun ComposeScreen(viewModel: DemoViewModel) {
         LazyColumn(modifier = Modifier.weight(1f)) {
             items(
                 items = delta.items,
-                // Use item ID for proper item tracking across moves/inserts/removes
-                key = { lazyAccess -> lazyAccess.getOrAcquire().item.id }
-            ) { lazyAccess ->
+                // Use stableId for proper item tracking - this ID follows the item through mutations
+                key = { stableLazyAccess -> stableLazyAccess.stableId }
+            ) { stableLazyAccess ->
                 LazyTickingItemCard(
-                    lazyAccess = lazyAccess,
+                    stableLazyAccess = stableLazyAccess,
                     isSelected = { id -> id == selectedId },
                     onClick = { id ->
                         selectedId = if (selectedId == id) null else id
@@ -74,27 +74,27 @@ fun ComposeScreen(viewModel: DemoViewModel) {
 }
 
 /**
- * A card that handles the LazyAccess lifecycle automatically.
- * - Acquires the TickingItem when entering composition
- * - Releases it when leaving composition
- * - Displays the tick count which updates periodically
+ * A card that handles the StableLazyAccess lifecycle automatically.
+ * Uses stableId for lifecycle management - the ID follows the item through mutations.
  */
 @Composable
 private fun LazyTickingItemCard(
-    lazyAccess: LazyAccess<TickingItem>,
+    stableLazyAccess: StableLazyAccess<TickingItem>,
     isSelected: (String) -> Boolean,
     onClick: (String) -> Unit
 ) {
     // Acquire the item - getOrAcquire() is idempotent (returns cached value if exists)
-    val tickingItem = lazyAccess.getOrAcquire()
+    val tickingItem = stableLazyAccess.getOrAcquire()
     val itemId = tickingItem.item.id
+    val stableId = stableLazyAccess.stableId
 
-    // Use item ID as key for lifecycle management.
-    // When the item leaves composition (removed from list), onDispose runs.
-    DisposableEffect(itemId) {
+    // Use stableId as key for lifecycle management.
+    // The stableId follows the item through mutations, so disposal only happens
+    // when the item is actually removed from the list.
+    DisposableEffect(stableId) {
         onDispose {
             tickingItem.stop()
-            lazyAccess.release()
+            stableLazyAccess.release()
         }
     }
 
@@ -121,7 +121,7 @@ private fun LazyTickingItemCard(
                 style = MaterialTheme.typography.bodyLarge
             )
             Text(
-                text = "Ticks: $tickCount (resets when scrolled out)",
+                text = "Ticks: $tickCount | StableId: $stableId",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

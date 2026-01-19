@@ -1,6 +1,5 @@
 package com.latenighthack.deltalist.demo
 
-import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -28,8 +27,8 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.DeltaFlow
-import com.latenighthack.deltalist.LazyAccess
 import com.latenighthack.deltalist.Mutation
+import com.latenighthack.deltalist.StableLazyAccess
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -124,17 +123,14 @@ private fun ControlButtons(
 }
 
 /**
- * RecyclerView adapter that demonstrates LazyAccess lifecycle management.
- * - Acquires TickingItems when views are attached (visible)
- * - Releases them when views are detached (scrolled out)
- * - Observes tick count and updates the view
+ * RecyclerView adapter using StableLazyAccess for stable IDs and lazy acquisition.
  */
 private class TickingItemAdapter(
-    private val deltaFlow: DeltaFlow<LazyAccess<TickingItem>>,
+    private val deltaFlow: DeltaFlow<StableLazyAccess<TickingItem>>,
     private val onItemClick: (Int) -> Unit
 ) : RecyclerView.Adapter<TickingItemAdapter.TickingItemViewHolder>() {
 
-    private var items: List<LazyAccess<TickingItem>> = emptyList()
+    private var items: List<StableLazyAccess<TickingItem>> = emptyList()
     private var collectionJob: Job? = null
     private var lifecycleOwner: LifecycleOwner? = null
 
@@ -145,6 +141,16 @@ private class TickingItemAdapter(
             if (oldIndex >= 0) notifyItemChanged(oldIndex)
             if (value >= 0) notifyItemChanged(value)
         }
+
+    init {
+        // Enable stable IDs for better RecyclerView animations
+        setHasStableIds(true)
+    }
+
+    override fun getItemId(position: Int): Long {
+        // Use the stableId from the adapter
+        return items[position].stableId.toLong()
+    }
 
     fun bind(owner: LifecycleOwner) {
         lifecycleOwner = owner
@@ -160,7 +166,7 @@ private class TickingItemAdapter(
         lifecycleOwner = null
     }
 
-    private fun applyDelta(delta: com.latenighthack.deltalist.Delta<LazyAccess<TickingItem>>) {
+    private fun applyDelta(delta: com.latenighthack.deltalist.Delta<StableLazyAccess<TickingItem>>) {
         items = delta.items
         when (val change = delta.change) {
             is Change.Reload -> notifyDataSetChanged()
@@ -205,8 +211,8 @@ private class TickingItemAdapter(
     }
 
     override fun onBindViewHolder(holder: TickingItemViewHolder, position: Int) {
-        val lazyAccess = items[position]
-        holder.bind(lazyAccess, position == selectedIndex, onItemClick, lifecycleOwner)
+        val stableLazyAccess = items[position]
+        holder.bind(stableLazyAccess, position == selectedIndex, onItemClick, lifecycleOwner)
     }
 
     override fun onViewAttachedToWindow(holder: TickingItemViewHolder) {
@@ -230,57 +236,58 @@ private class TickingItemAdapter(
         private val tickView: TextView
     ) : RecyclerView.ViewHolder(view) {
 
-        private var currentLazyAccess: LazyAccess<TickingItem>? = null
+        private var currentStableLazyAccess: StableLazyAccess<TickingItem>? = null
         private var currentTickingItem: TickingItem? = null
         private var tickObserverJob: Job? = null
         private var lifecycleOwner: LifecycleOwner? = null
 
         fun bind(
-            lazyAccess: LazyAccess<TickingItem>,
+            stableLazyAccess: StableLazyAccess<TickingItem>,
             isSelected: Boolean,
             onClick: (Int) -> Unit,
             owner: LifecycleOwner?
         ) {
             // Clean up previous item if different
-            if (currentLazyAccess !== lazyAccess) {
+            if (currentStableLazyAccess !== stableLazyAccess) {
                 releaseCurrentItem()
             }
 
-            currentLazyAccess = lazyAccess
+            currentStableLazyAccess = stableLazyAccess
             lifecycleOwner = owner
 
             // Acquire and display the item
-            val tickingItem = lazyAccess.getOrAcquire()
+            val tickingItem = stableLazyAccess.getOrAcquire()
             currentTickingItem = tickingItem
 
+            val stableId = stableLazyAccess.stableId
             titleView.text = tickingItem.item.title
-            tickView.text = "Ticks: ${tickingItem.tickCount.value} (resets when scrolled out)"
+            tickView.text = "Ticks: ${tickingItem.tickCount.value} | StableId: $stableId"
 
             itemView.isActivated = isSelected
             itemView.setBackgroundColor(if (isSelected) 0x330000FF else 0x00000000)
             itemView.setOnClickListener { onClick(bindingAdapterPosition) }
 
             // Start observing tick count
-            startObservingTicks(tickingItem, owner)
+            startObservingTicks(tickingItem, stableId, owner)
         }
 
-        private fun startObservingTicks(tickingItem: TickingItem, owner: LifecycleOwner?) {
+        private fun startObservingTicks(tickingItem: TickingItem, stableId: Int, owner: LifecycleOwner?) {
             tickObserverJob?.cancel()
             tickObserverJob = owner?.lifecycleScope?.launch {
                 tickingItem.tickCount.collectLatest { count ->
-                    tickView.text = "Ticks: $count (resets when scrolled out)"
+                    tickView.text = "Ticks: $count | StableId: $stableId"
                 }
             }
         }
 
         fun onAttached() {
             // Item is now visible - ensure it's acquired and observing
-            currentLazyAccess?.let { lazyAccess ->
+            currentStableLazyAccess?.let { stableLazyAccess ->
                 if (currentTickingItem == null) {
-                    val tickingItem = lazyAccess.getOrAcquire()
+                    val tickingItem = stableLazyAccess.getOrAcquire()
                     currentTickingItem = tickingItem
                     titleView.text = tickingItem.item.title
-                    startObservingTicks(tickingItem, lifecycleOwner)
+                    startObservingTicks(tickingItem, stableLazyAccess.stableId, lifecycleOwner)
                 }
             }
         }
@@ -301,8 +308,8 @@ private class TickingItemAdapter(
             currentTickingItem?.stop()
             currentTickingItem = null
 
-            currentLazyAccess?.release()
-            currentLazyAccess = null
+            currentStableLazyAccess?.release()
+            currentStableLazyAccess = null
         }
     }
 }

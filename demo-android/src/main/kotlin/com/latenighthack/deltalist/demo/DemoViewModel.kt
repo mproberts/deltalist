@@ -1,9 +1,10 @@
 package com.latenighthack.deltalist.demo
 
 import com.latenighthack.deltalist.DeltaFlow
-import com.latenighthack.deltalist.LazyAccess
+import com.latenighthack.deltalist.StableLazyAccess
 import com.latenighthack.deltalist.mutableDeltaFlowOf
 import com.latenighthack.deltalist.operators.lazyMapWithAccess
+import com.latenighthack.deltalist.operators.withStableLazyIds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -17,16 +18,14 @@ class DemoViewModel {
     private val tickingScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /**
-     * Lazy-mapped flow that transforms Items to TickingItems.
-     * Each TickingItem starts a timer when acquired (visible) and stops when released.
-     * Demonstrates the retention system:
-     * - Items in view maintain their tick count
-     * - Items scrolled out of view are released and lose their tick count
-     * - Items scrolled back in start from tick 0
+     * Lazy-mapped flow with stable IDs for platform binding.
+     *
+     * The stable ID follows each item through mutations (insert, remove, move).
+     * Platform bindings should use stableId as the key for UI framework item tracking.
      */
-    val tickingItems: DeltaFlow<LazyAccess<TickingItem>> = _items.lazyMapWithAccess { item ->
-        TickingItem(item, tickingScope)
-    }
+    val tickingItems: DeltaFlow<StableLazyAccess<TickingItem>> = _items
+        .lazyMapWithAccess { item -> TickingItem(item, tickingScope) }
+        .withStableLazyIds()
 
     private var counter = 0
 

@@ -76,10 +76,12 @@ internal class PaginatedDeltaFlowImpl<T, U>(
     }
 
     private fun triggerInitialFetch() {
+        // Early check to avoid launching unnecessary coroutines
         if (_initialLoadDone || _isLoadingAfter) return
 
         scope.launch {
             mutex.withLock {
+                // Double-check under lock for thread safety
                 if (_initialLoadDone || _isLoadingAfter) return@launch
                 _isLoadingAfter = true
             }
@@ -107,10 +109,13 @@ internal class PaginatedDeltaFlowImpl<T, U>(
     }
 
     private fun triggerBeforeFetch() {
+        // Early check to avoid launching unnecessary coroutines
+        if (_isLoadingBefore) return
         val token = _beforeToken ?: return
 
         scope.launch {
             mutex.withLock {
+                // Double-check under lock for thread safety
                 if (_isLoadingBefore || _beforeToken == null) return@launch
                 _isLoadingBefore = true
             }
@@ -141,10 +146,13 @@ internal class PaginatedDeltaFlowImpl<T, U>(
     }
 
     private fun triggerAfterFetch() {
+        // Early check to avoid launching unnecessary coroutines
+        if (_isLoadingAfter) return
         val token = _afterToken ?: return
 
         scope.launch {
             mutex.withLock {
+                // Double-check under lock for thread safety
                 if (_isLoadingAfter || _afterToken == null) return@launch
                 _isLoadingAfter = true
             }

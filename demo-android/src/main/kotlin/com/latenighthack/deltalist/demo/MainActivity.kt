@@ -54,6 +54,11 @@ fun MainScreen() {
                 onClick = { selectedTab = 1 },
                 text = { Text("RecyclerView") }
             )
+            Tab(
+                selected = selectedTab == 2,
+                onClick = { selectedTab = 2 },
+                text = { Text("Paginated") }
+            )
         }
 
         // Keep both screens in composition to demonstrate retention.
@@ -79,6 +84,16 @@ fun MainScreen() {
                     .zIndex(if (selectedTab == 1) 1f else 0f)
             ) {
                 RecyclerViewScreen(viewModel = viewModel)
+            }
+
+            // Paginated list screen - visible when tab 2 is selected
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .alpha(if (selectedTab == 2) 1f else 0f)
+                    .zIndex(if (selectedTab == 2) 1f else 0f)
+            ) {
+                PaginatedListScreen(viewModel = viewModel)
             }
         }
     }

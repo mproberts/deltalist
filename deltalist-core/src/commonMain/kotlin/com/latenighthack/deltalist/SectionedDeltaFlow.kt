@@ -1,0 +1,10 @@
+package com.latenighthack.deltalist
+
+import kotlinx.coroutines.flow.Flow
+
+/**
+ * A flow of sectioned delta emissions.
+ * Preserves section structure for UI frameworks that support native sections
+ * (UICollectionView, UITableView).
+ */
+typealias SectionedDeltaFlow<S, T> = Flow<SectionedDelta<S, T>>

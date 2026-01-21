@@ -108,7 +108,14 @@ internal class StableIdAdapter<T> {
     private var idMapping = mutableListOf<Int>()
 
     fun applyDelta(delta: Delta<T>): Delta<StableItem<T>> {
-        when (val change = delta.change) {
+        // If idMapping is empty, we can't apply mutations - treat as Reload
+        val effectiveChange = if (idMapping.isEmpty() && delta.change !is Change.Reload) {
+            Change.Reload
+        } else {
+            delta.change
+        }
+
+        when (effectiveChange) {
             is Change.Reload -> {
                 // On reload, regenerate all IDs
                 idMapping.clear()
@@ -117,14 +124,14 @@ internal class StableIdAdapter<T> {
                 }
             }
             is Change.Mutations -> {
-                for (mutation in change.operations) {
+                for (mutation in effectiveChange.operations) {
                     applyMutation(mutation)
                 }
             }
         }
 
         // Use lazy wrapper list - items are only accessed when get() is called
-        return Delta(StableItemList(delta.items, idMapping.toList()), delta.change)
+        return Delta(StableItemList(delta.items, idMapping.toList()), effectiveChange)
     }
 
     private fun applyMutation(mutation: Mutation) {
@@ -161,7 +168,14 @@ internal class StableLazyAccessAdapter<T> {
     private var idMapping = mutableListOf<Int>()
 
     fun applyDelta(delta: Delta<LazyAccess<T>>): Delta<StableLazyAccess<T>> {
-        when (val change = delta.change) {
+        // If idMapping is empty, we can't apply mutations - treat as Reload
+        val effectiveChange = if (idMapping.isEmpty() && delta.change !is Change.Reload) {
+            Change.Reload
+        } else {
+            delta.change
+        }
+
+        when (effectiveChange) {
             is Change.Reload -> {
                 idMapping.clear()
                 repeat(delta.items.size) {
@@ -169,14 +183,14 @@ internal class StableLazyAccessAdapter<T> {
                 }
             }
             is Change.Mutations -> {
-                for (mutation in change.operations) {
+                for (mutation in effectiveChange.operations) {
                     applyMutation(mutation)
                 }
             }
         }
 
         // Use lazy wrapper list - items are only accessed when get() is called
-        return Delta(StableLazyAccessList(delta.items, idMapping.toList()), delta.change)
+        return Delta(StableLazyAccessList(delta.items, idMapping.toList()), effectiveChange)
     }
 
     private fun applyMutation(mutation: Mutation) {

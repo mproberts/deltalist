@@ -136,23 +136,28 @@ fun <T> DeltaFlow<T>.filterItems(predicate: (T) -> Boolean): DeltaFlow<T> = flow
         val (currentFilteredIndices, sourceLoadedCount) = buildFilteredIndices(sourceItems, predicate)
         val filteredIndicesList = currentFilteredIndices.sorted()
 
-        val change = when (delta.change) {
-            is Change.Reload -> Change.Reload
-            is Change.Mutations -> {
-                val mutations = translateMutations(
-                    mutations = delta.change.operations,
-                    previousSourceItems = previousSourceItems,
-                    previousFilteredIndices = previousFilteredIndices,
-                    currentSourceItems = sourceItems,
-                    currentFilteredIndices = currentFilteredIndices,
-                    predicate = predicate
-                )
-                if (mutations.isEmpty()) {
-                    previousSourceItems = sourceItems
-                    previousFilteredIndices = currentFilteredIndices
-                    return@collect
+        // If previousSourceItems is empty, we can't translate mutations - treat as Reload
+        val change = if (previousSourceItems.isEmpty() && delta.change !is Change.Reload) {
+            Change.Reload
+        } else {
+            when (delta.change) {
+                is Change.Reload -> Change.Reload
+                is Change.Mutations -> {
+                    val mutations = translateMutations(
+                        mutations = delta.change.operations,
+                        previousSourceItems = previousSourceItems,
+                        previousFilteredIndices = previousFilteredIndices,
+                        currentSourceItems = sourceItems,
+                        currentFilteredIndices = currentFilteredIndices,
+                        predicate = predicate
+                    )
+                    if (mutations.isEmpty()) {
+                        previousSourceItems = sourceItems
+                        previousFilteredIndices = currentFilteredIndices
+                        return@collect
+                    }
+                    Change.Mutations(mutations)
                 }
-                Change.Mutations(mutations)
             }
         }
 
@@ -225,22 +230,27 @@ fun <T> DeltaFlow<T>.filterItemsDynamic(
                 val filteredIndicesList = currentFilteredIndices.sorted()
                 currentSourceLoadedCount = loadedCount
 
-                val change = when (delta.change) {
-                    is Change.Reload -> Change.Reload
-                    is Change.Mutations -> {
-                        val mutations = translateMutations(
-                            mutations = delta.change.operations,
-                            previousSourceItems = currentSourceItems,
-                            previousFilteredIndices = previousFilteredIndices,
-                            currentSourceItems = sourceItems,
-                            currentFilteredIndices = currentFilteredIndices,
-                            predicate = predicate
-                        )
-                        if (mutations.isEmpty()) {
-                            previousFilteredIndices = currentFilteredIndices
-                            return@collect
+                // If previousFilteredIndices is empty, we can't translate mutations - treat as Reload
+                val change = if (previousFilteredIndices.isEmpty() && delta.change !is Change.Reload) {
+                    Change.Reload
+                } else {
+                    when (delta.change) {
+                        is Change.Reload -> Change.Reload
+                        is Change.Mutations -> {
+                            val mutations = translateMutations(
+                                mutations = delta.change.operations,
+                                previousSourceItems = currentSourceItems,
+                                previousFilteredIndices = previousFilteredIndices,
+                                currentSourceItems = sourceItems,
+                                currentFilteredIndices = currentFilteredIndices,
+                                predicate = predicate
+                            )
+                            if (mutations.isEmpty()) {
+                                previousFilteredIndices = currentFilteredIndices
+                                return@collect
+                            }
+                            Change.Mutations(mutations)
                         }
-                        Change.Mutations(mutations)
                     }
                 }
 

@@ -27,6 +27,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -127,6 +128,7 @@ private fun PaginatedComposeContent(viewModel: PaginatedListViewModel) {
                         NumberItemCard(number = soft.value, index = index)
                     }
                     is SoftValue.NotLoaded -> {
+                        // Trigger fetch - the filter operator handles cascading automatically
                         try {
                             delta.items[index]
                         } catch (_: IndexOutOfBoundsException) {}
@@ -381,7 +383,7 @@ private class PaginatedNumberAdapter(
             }
             is LoadingViewHolder -> {
                 // Trigger fetch for unloaded items by accessing via getItem()
-                // which will trigger the SoftList's fetch mechanism
+                // The filter operator handles cascading fetches automatically
                 try {
                     getItem(position)
                 } catch (_: IndexOutOfBoundsException) {}

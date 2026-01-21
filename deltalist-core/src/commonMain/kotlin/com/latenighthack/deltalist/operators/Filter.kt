@@ -23,11 +23,14 @@ import kotlinx.coroutines.flow.map
  * @param source The source list to filter
  * @param filteredIndices Sorted list of source indices that pass the filter
  * @param sourceLoadedCount Number of actually loaded items in source (not estimated)
+ * @param onUnloadedAccess Called when get() accesses an unloaded filtered index.
+ *        Used by the filter operator to track pending accesses and cascade fetches.
  */
 internal class FilteredList<T>(
     private val source: List<T>,
     private val filteredIndices: List<Int>,
-    private val sourceLoadedCount: Int
+    private val sourceLoadedCount: Int,
+    private val onUnloadedAccess: ((Int) -> Unit)? = null
 ) : AbstractList<T>(), SoftList<T> {
 
     // Estimate total filtered size based on current filter ratio
@@ -60,14 +63,16 @@ internal class FilteredList<T>(
             return source[filteredIndices[index]]
         }
 
-        // Beyond loaded filtered items - trigger fetch on source if possible
-        if (source is SoftList<*> && sourceLoadedCount > 0) {
-            // Access near the end of loaded items to trigger a fetch
-            // This preserves encapsulation - we just access the source normally
+        // Beyond loaded filtered items - notify and trigger fetch
+        onUnloadedAccess?.invoke(index)
+
+        if (source is SoftList<*>) {
+            // Access the first unloaded item to trigger a fetch
+            // This will cause the SoftList to request more data
             try {
-                source[sourceLoadedCount - 1]
+                source[sourceLoadedCount]
             } catch (_: IndexOutOfBoundsException) {
-                // Ignore - source might have changed
+                // Ignore - source might have changed or be fully loaded
             }
         }
 
@@ -182,6 +187,11 @@ private sealed class FilterEvent<out T> {
  * When [predicateFlow] emits a new predicate, all current items are re-filtered
  * and a [Change.Reload] is emitted.
  *
+ * This operator automatically cascades fetches for paginated sources: when the UI
+ * accesses a filtered index that's not yet loaded, the operator tracks that access
+ * and continues fetching from the source until the index is satisfied or the source
+ * is exhausted.
+ *
  * This is useful when the filter criteria can change (e.g., from user input)
  * and the filtered list should update immediately.
  *
@@ -197,6 +207,43 @@ fun <T> DeltaList<T>.filterItemsDynamic(
     var currentPredicate: ((T) -> Boolean)? = null
     var pendingDelta: Delta<T>? = null // Store delta if it arrives before predicate
 
+    // Track filtered indices that have been accessed but not yet loaded.
+    // This enables cascading fetches: when the UI accesses an unloaded filtered item,
+    // we keep fetching from the source until that item is satisfied.
+    val pendingAccessIndices = mutableSetOf<Int>()
+
+    // Callback for FilteredList to notify when unloaded items are accessed
+    val onUnloadedAccess: (Int) -> Unit = { index ->
+        pendingAccessIndices.add(index)
+    }
+
+    // Helper to create FilteredList with access tracking
+    fun createFilteredList(source: List<T>, indices: List<Int>, loadedCount: Int): FilteredList<T> {
+        return FilteredList(source, indices, loadedCount, onUnloadedAccess)
+    }
+
+    // Cascade fetches: after emitting a delta, check if pending accesses are still
+    // NotLoaded and trigger another fetch if needed
+    fun cascadeFetchesIfNeeded(filteredList: FilteredList<T>, source: List<T>, sourceLoadedCount: Int) {
+        // Find indices that are still not loaded
+        val stillPending = pendingAccessIndices.filter { index ->
+            index < filteredList.size && filteredList.softGet(index) is SoftValue.NotLoaded
+        }
+
+        // Update pending set
+        pendingAccessIndices.clear()
+        pendingAccessIndices.addAll(stillPending)
+
+        // If there are still pending accesses and source has more data, trigger fetch
+        if (stillPending.isNotEmpty() && source is SoftList<*> && sourceLoadedCount < source.size) {
+            try {
+                source[sourceLoadedCount]
+            } catch (_: IndexOutOfBoundsException) {
+                // Source exhausted
+            }
+        }
+    }
+
     // Merge upstream deltas with predicate changes
     val upstream = this@filterItemsDynamic
 
@@ -207,6 +254,9 @@ fun <T> DeltaList<T>.filterItemsDynamic(
         when (event) {
             is FilterEvent.PredicateChanged -> {
                 currentPredicate = event.predicate
+
+                // Clear pending accesses on predicate change - they're no longer valid
+                pendingAccessIndices.clear()
 
                 // Check if we have a pending delta that arrived before the predicate
                 val deltaToProcess = pendingDelta
@@ -223,7 +273,9 @@ fun <T> DeltaList<T>.filterItemsDynamic(
                     previousFilteredIndices = filteredIndices
                     currentSourceLoadedCount = loadedCount
 
-                    emit(Delta(FilteredList(sourceItems, filteredIndicesList, loadedCount), Change.Reload))
+                    val filteredList = createFilteredList(sourceItems, filteredIndicesList, loadedCount)
+                    emit(Delta(filteredList, Change.Reload))
+                    cascadeFetchesIfNeeded(filteredList, sourceItems, loadedCount)
                 } else if (currentSourceItems.isNotEmpty()) {
                     // Predicate changed - re-filter current items and emit Reload
                     val (filteredIndices, loadedCount) = buildFilteredIndices(currentSourceItems, event.predicate)
@@ -232,7 +284,9 @@ fun <T> DeltaList<T>.filterItemsDynamic(
                     previousFilteredIndices = filteredIndices
                     currentSourceLoadedCount = loadedCount
 
-                    emit(Delta(FilteredList(currentSourceItems, filteredIndicesList, loadedCount), Change.Reload))
+                    val filteredList = createFilteredList(currentSourceItems, filteredIndicesList, loadedCount)
+                    emit(Delta(filteredList, Change.Reload))
+                    cascadeFetchesIfNeeded(filteredList, currentSourceItems, loadedCount)
                 }
             }
 
@@ -270,6 +324,9 @@ fun <T> DeltaList<T>.filterItemsDynamic(
                             )
                             if (mutations.isEmpty()) {
                                 previousFilteredIndices = currentFilteredIndices
+                                // Still cascade fetches even if no mutations to emit
+                                val filteredList = createFilteredList(sourceItems, filteredIndicesList, loadedCount)
+                                cascadeFetchesIfNeeded(filteredList, sourceItems, loadedCount)
                                 return@collect
                             }
                             Change.Mutations(mutations)
@@ -279,7 +336,9 @@ fun <T> DeltaList<T>.filterItemsDynamic(
 
                 previousFilteredIndices = currentFilteredIndices
 
-                emit(Delta(FilteredList(sourceItems, filteredIndicesList, loadedCount), change))
+                val filteredList = createFilteredList(sourceItems, filteredIndicesList, loadedCount)
+                emit(Delta(filteredList, change))
+                cascadeFetchesIfNeeded(filteredList, sourceItems, loadedCount)
             }
         }
     }

@@ -1,10 +1,10 @@
 package com.latenighthack.deltalist.demo
 
 import com.latenighthack.deltalist.DeltaList
-import com.latenighthack.deltalist.StableLazyAccess
+import com.latenighthack.deltalist.StableItem
 import com.latenighthack.deltalist.mutableDeltaListOf
-import com.latenighthack.deltalist.operators.lazyMapWithAccess
-import com.latenighthack.deltalist.operators.withStableLazyIds
+import com.latenighthack.deltalist.operators.lazyMap
+import com.latenighthack.deltalist.operators.withStableIds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,9 +16,12 @@ class ListViewModel {
 
     private val tickingScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    val tickingItems: DeltaList<StableLazyAccess<TickingItem>> = _items
-        .lazyMapWithAccess { item -> TickingItem(item, tickingScope) }
-        .withStableLazyIds()
+    // New clean API: lazyMap + withStableIds
+    // Type is DeltaList<StableItem<TickingItem>> instead of DeltaList<StableLazyAccess<TickingItem>>
+    // Platform adapters automatically manage lazy lifecycle
+    val tickingItems: DeltaList<StableItem<TickingItem>> = _items
+        .lazyMap { item -> TickingItem(item, tickingScope) }
+        .withStableIds()
 
     private var counter = 0
 

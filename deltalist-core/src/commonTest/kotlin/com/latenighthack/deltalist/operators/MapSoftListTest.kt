@@ -2,6 +2,7 @@ package com.latenighthack.deltalist.operators
 
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
+import com.latenighthack.deltalist.LazyList
 import com.latenighthack.deltalist.Mutation
 import com.latenighthack.deltalist.SoftList
 import com.latenighthack.deltalist.SoftValue
@@ -313,85 +314,8 @@ class MapSoftListTest {
         assertTrue((soft50 is SoftValue.NotLoaded))
     }
 
-    // ==================== lazyMapWithAccess Tests ====================
-
     @Test
-    fun lazyMapWithAccess_preservesSoftListSize() = runTest {
-        val sourceFlow = MutableStateFlow(
-            Delta(
-                MockSoftList(
-                    loadedItems = listOf(1, 2, 3, 4, 5),
-                    estimatedTotal = 100
-                ),
-                Change.Reload
-            )
-        )
-
-        val mapped = sourceFlow.lazyMapWithAccess { it * 2 }
-
-        val results = mutableListOf<Delta<com.latenighthack.deltalist.LazyAccess<Int>>>()
-        val job = launch { mapped.collect { results.add(it) } }
-
-        delay(50)
-        job.cancel()
-
-        assertEquals(100, results[0].items.size)
-    }
-
-    @Test
-    fun lazyMapWithAccess_softGetReturnsPresentForLoadedItems() = runTest {
-        val sourceFlow = MutableStateFlow(
-            Delta(
-                MockSoftList(
-                    loadedItems = listOf(1, 2, 3),
-                    estimatedTotal = 50
-                ),
-                Change.Reload
-            )
-        )
-
-        val mapped = sourceFlow.lazyMapWithAccess { it * 2 }
-
-        val results = mutableListOf<Delta<com.latenighthack.deltalist.LazyAccess<Int>>>()
-        val job = launch { mapped.collect { results.add(it) } }
-
-        delay(50)
-        job.cancel()
-
-        // Loaded items should return Present(LazyAccess)
-        val soft0 = results[0].items.softGetOrNull(0)
-        assertIs<SoftValue.Present<*>>(soft0)
-
-        val soft2 = results[0].items.softGetOrNull(2)
-        assertIs<SoftValue.Present<*>>(soft2)
-    }
-
-    @Test
-    fun lazyMapWithAccess_softGetReturnsNotLoadedForUnloadedItems() = runTest {
-        val sourceFlow = MutableStateFlow(
-            Delta(
-                MockSoftList(
-                    loadedItems = listOf(1, 2, 3),
-                    estimatedTotal = 100
-                ),
-                Change.Reload
-            )
-        )
-
-        val mapped = sourceFlow.lazyMapWithAccess { it * 2 }
-
-        val results = mutableListOf<Delta<com.latenighthack.deltalist.LazyAccess<Int>>>()
-        val job = launch { mapped.collect { results.add(it) } }
-
-        delay(50)
-        job.cancel()
-
-        val soft50 = results[0].items.softGetOrNull(50)
-        assertTrue((soft50 is SoftValue.NotLoaded))
-    }
-
-    @Test
-    fun lazyMapWithAccess_acquireOnLoadedItemWorks() = runTest {
+    fun lazyMap_acquireOnLoadedItemWorks() = runTest {
         val sourceFlow = MutableStateFlow(
             Delta(
                 MockSoftList(
@@ -402,18 +326,18 @@ class MapSoftListTest {
             )
         )
 
-        val mapped = sourceFlow.lazyMapWithAccess { it * 10 }
+        val mapped = sourceFlow.lazyMap { it * 10 }
 
-        val results = mutableListOf<Delta<com.latenighthack.deltalist.LazyAccess<Int>>>()
+        val results = mutableListOf<Delta<Int>>()
         val job = launch { mapped.collect { results.add(it) } }
 
         delay(50)
         job.cancel()
 
-        // Get the LazyAccess for a loaded item and acquire it
-        val access = results[0].items[2] // Source value 3
-        assertEquals(30, access.getOrAcquire()) // 3 * 10 = 30
-        assertTrue(access.isAcquired)
+        // Get the value for a loaded item (auto-acquires)
+        val value = results[0].items[2] // Source value 3
+        assertEquals(30, value) // 3 * 10 = 30
+        assertTrue((results[0].items as LazyList<Int>).isAcquired(2))
     }
 
     // ==================== Mutation Passthrough Tests ====================

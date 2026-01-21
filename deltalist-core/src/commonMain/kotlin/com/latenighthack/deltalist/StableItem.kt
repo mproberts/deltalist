@@ -24,33 +24,9 @@ interface StableItem<out T> {
 }
 
 /**
- * Combines [LazyAccess] with a stable identifier.
- *
- * Use this when you need both lazy acquisition semantics and stable IDs for UI binding.
- */
-interface StableLazyAccess<out T> : LazyAccess<T> {
-    /**
-     * A session-unique integer identifier that remains stable as the item moves.
-     */
-    val stableId: Int
-}
-
-/**
  * Simple implementation of StableItem.
  */
 internal data class StableItemImpl<T>(
     override val stableId: Int,
     override val value: T
 ) : StableItem<T>
-
-/**
- * Implementation of StableLazyAccess that delegates to an underlying LazyAccess.
- */
-internal class StableLazyAccessImpl<T>(
-    override val stableId: Int,
-    private val delegate: LazyAccess<T>
-) : StableLazyAccess<T> {
-    override fun getOrAcquire(): T = delegate.getOrAcquire()
-    override fun release() = delegate.release()
-    override val isAcquired: Boolean get() = delegate.isAcquired
-}

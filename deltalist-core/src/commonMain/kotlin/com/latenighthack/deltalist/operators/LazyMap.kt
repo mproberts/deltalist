@@ -3,7 +3,7 @@ package com.latenighthack.deltalist.operators
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
-import com.latenighthack.deltalist.LazyAccess
+import com.latenighthack.deltalist.LazyList
 import com.latenighthack.deltalist.Mutation
 import com.latenighthack.deltalist.SoftList
 import com.latenighthack.deltalist.SoftValue
@@ -12,45 +12,53 @@ import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 /**
- * Simple lazy transformation without caching - transforms on every access.
- * Use this when transformations are cheap or when you don't need retention semantics.
- */
-fun <T, R> DeltaList<T>.lazyMap(transform: (T) -> R): DeltaList<R> = flow {
-    collect { delta ->
-        emit(Delta(
-            items = SimpleLazyMapList(delta.items, transform),
-            change = delta.change
-        ))
-    }
-}
-
-typealias LazyDeltaList<T> = DeltaList<LazyAccess<T>>
-
-/**
  * Lazy transformation with acquire/release semantics for memory management.
  *
  * Thread-safe: Uses lock-free atomic operations to handle concurrent access
  * from delta producers (any thread) and UI consumers (typically main thread).
  *
- * Returns a flow of Delta<LazyAccess<R>> where each LazyAccess:
- * - Computes and caches the transformation on first getOrAcquire()
- * - Returns the same cached instance on subsequent getOrAcquire() calls
- * - Tracks position changes automatically across mutations
- * - Allows release() to free the cached value
+ * Returns a DeltaList where items are backed by [LazyList]:
+ * - Accessing items via `get()` computes and caches the transformation
+ * - Platform adapters detect [LazyList] and call `release()` automatically
+ * - Items track position changes across mutations
  *
- * Platform bindings should:
- * - Call getOrAcquire() when an item enters the viewport
- * - Call release() when an item leaves the viewport
+ * Example:
+ * ```kotlin
+ * val items: DeltaList<MyItem> = ...
+ * val transformed: DeltaList<TransformedItem> = items.lazyMap { transform(it) }
+ *
+ * // In Compose - adapters handle release automatically:
+ * items(delta.items, key = { it.stableId }) { item ->
+ *     // item is auto-acquired on access, auto-released on disposal
+ *     MyCard(item)
+ * }
+ * ```
  *
  * @param transform The transformation function to apply lazily
- * @return A DeltaList of LazyAccess wrappers
+ * @return A DeltaList backed by LazyList for automatic lifecycle management
  */
-fun <T, R> DeltaList<T>.lazyMapWithAccess(transform: (T) -> R): LazyDeltaList<R> = flow {
+fun <T, R> DeltaList<T>.lazyMap(transform: (T) -> R): DeltaList<R> = flow {
     val state = LazyMapState(transform)
 
     collect { delta ->
         state.applyDelta(delta)
         emit(Delta(state.asList(), delta.change))
+    }
+}
+
+/**
+ * Simple transformation without caching - transforms on every access.
+ * Use this when transformations are cheap or when you don't need retention semantics.
+ *
+ * This is similar to [map] but defers transformation to access time rather than
+ * transforming all items upfront.
+ */
+fun <T, R> DeltaList<T>.deferredMap(transform: (T) -> R): DeltaList<R> = flow {
+    collect { delta ->
+        emit(Delta(
+            items = SimpleLazyMapList(delta.items, transform),
+            change = delta.change
+        ))
     }
 }
 
@@ -84,7 +92,7 @@ internal class SimpleLazyMapList<T, R>(
  *
  * Uses atomic CAS operations to ensure consistency between:
  * - Delta producers calling applyDelta() (potentially background thread)
- * - UI consumers calling getOrAcquire()/release() (typically main thread)
+ * - UI consumers calling get()/release() (typically main thread)
  *
  * All operations are lock-free and use immutable snapshots.
  */
@@ -103,12 +111,9 @@ internal class LazyMapState<S, T>(
 
     private val snapshot = AtomicReference<Snapshot<S, T>>(Snapshot(emptyList(), emptyMap()))
 
-    // Cache of LazyAccessImpl instances by index for object stability
-    private val accessorCache = AtomicReference<Map<Int, LazyAccessImpl>>(emptyMap())
-
     /**
      * Apply a delta, atomically updating the source and transforming cache indices.
-     * Uses CAS loop to handle concurrent modifications from getOrAcquire/release.
+     * Uses CAS loop to handle concurrent modifications from get/release.
      */
     fun applyDelta(delta: Delta<S>) {
         while (true) {
@@ -208,58 +213,25 @@ internal class LazyMapState<S, T>(
     }
 
     /**
-     * Returns a list view that provides thread-safe LazyAccess wrappers.
-     * LazyAccess instances are cached for object stability across list accesses.
-     * The size and source are captured at creation time for consistency during equality comparisons.
+     * Returns a [LazyList] view that provides thread-safe lazy access.
+     * Items are auto-acquired on access via `get()`.
+     * The size and source are captured at creation time for consistency.
      */
-    fun asList(): List<LazyAccess<T>> {
+    fun asList(): LazyList<T> {
         val currentSnapshot = snapshot.load()
-        return LazyAccessList(currentSnapshot.source.size, currentSnapshot.source)
+        return LazyListImpl(currentSnapshot.source.size, currentSnapshot.source)
     }
 
-    private inner class LazyAccessList(
+    /**
+     * LazyList implementation that auto-acquires items on access.
+     */
+    private inner class LazyListImpl(
         override val size: Int,
         private val sourceAtCreation: List<S>
-    ) : AbstractList<LazyAccess<T>>(), SoftList<LazyAccess<T>> {
+    ) : AbstractList<T>(), LazyList<T>, SoftList<T> {
 
-        override fun get(index: Int): LazyAccess<T> {
-            // Return cached accessor for object stability
-            while (true) {
-                val currentCache = accessorCache.load()
-                currentCache[index]?.let { return it }
-
-                // Create new accessor and cache it
-                val newAccessor = LazyAccessImpl(index)
-                val newCache = currentCache + (index to newAccessor)
-
-                if (accessorCache.compareAndExchange(currentCache, newCache) === currentCache) {
-                    return newAccessor
-                }
-                // CAS failed - someone else might have created it, retry
-            }
-        }
-
-        override fun softGet(index: Int): SoftValue<LazyAccess<T>>? {
-            if (index < 0 || index >= size) return null
-
-            return if (sourceAtCreation is SoftList<S>) {
-                when (val soft = sourceAtCreation.softGet(index)) {
-                    is SoftValue.Present -> SoftValue.Present(get(index))
-                    is SoftValue.NotLoaded -> soft
-                    null -> null
-                }
-            } else {
-                SoftValue.Present(get(index))
-            }
-        }
-    }
-
-    private inner class LazyAccessImpl(private val index: Int) : LazyAccess<T> {
-        /**
-         * Gets the transformed value, computing and caching atomically if needed.
-         * Uses CAS loop to handle concurrent access.
-         */
-        override fun getOrAcquire(): T {
+        override fun get(index: Int): T {
+            // Auto-acquire: compute and cache if not already cached
             while (true) {
                 val current = snapshot.load()
 
@@ -283,11 +255,7 @@ internal class LazyMapState<S, T>(
             }
         }
 
-        /**
-         * Releases the cached value atomically.
-         * Uses CAS loop to handle concurrent access.
-         */
-        override fun release() {
+        override fun release(index: Int) {
             while (true) {
                 val current = snapshot.load()
 
@@ -304,8 +272,39 @@ internal class LazyMapState<S, T>(
             }
         }
 
-        override val isAcquired: Boolean
-            get() = snapshot.load().cache.containsKey(index)
+        override fun releaseAll() {
+            while (true) {
+                val current = snapshot.load()
+
+                // Fast path: nothing cached
+                if (current.cache.isEmpty()) return
+
+                val newSnapshot = current.copy(cache = emptyMap())
+
+                if (snapshot.compareAndExchange(current, newSnapshot) === current) {
+                    return
+                }
+                // CAS failed - retry
+            }
+        }
+
+        override fun isAcquired(index: Int): Boolean {
+            return snapshot.load().cache.containsKey(index)
+        }
+
+        override fun softGet(index: Int): SoftValue<T>? {
+            if (index < 0 || index >= size) return null
+
+            return if (sourceAtCreation is SoftList<S>) {
+                when (val soft = sourceAtCreation.softGet(index)) {
+                    is SoftValue.Present -> SoftValue.Present(get(index))
+                    is SoftValue.NotLoaded -> soft
+                    null -> null
+                }
+            } else {
+                SoftValue.Present(get(index))
+            }
+        }
     }
 
     // For testing

@@ -3,12 +3,10 @@ package com.latenighthack.deltalist.operators
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
-import com.latenighthack.deltalist.LazyAccess
+import com.latenighthack.deltalist.LazyList
 import com.latenighthack.deltalist.Mutation
 import com.latenighthack.deltalist.StableItem
 import com.latenighthack.deltalist.StableItemImpl
-import com.latenighthack.deltalist.StableLazyAccess
-import com.latenighthack.deltalist.StableLazyAccessImpl
 import kotlinx.coroutines.flow.flow
 
 /**
@@ -16,6 +14,10 @@ import kotlinx.coroutines.flow.flow
  *
  * The stable IDs follow items as they move through mutations (insert, remove, move).
  * On reload, all IDs are regenerated.
+ *
+ * When the source is backed by a [LazyList], the resulting list preserves lazy semantics:
+ * - Items are auto-acquired on access
+ * - Platform adapters detect [LazyList] and call release() automatically
  *
  * Use this at the boundary between deltalist-core and platform bindings to provide
  * stable keys without requiring the underlying data to implement Identifiable.
@@ -30,37 +32,20 @@ import kotlinx.coroutines.flow.flow
  *     MyItemCard(stableItem.value)
  * }
  * ```
- */
-fun <T> DeltaList<T>.withStableIds(): DeltaList<StableItem<T>> = flow {
-    val adapter = StableIdAdapter<T>()
-
-    collect { delta ->
-        emit(adapter.applyDelta(delta))
-    }
-}
-
-/**
- * Wraps LazyAccess items with session-stable integer identifiers.
  *
- * Combines lazy acquisition semantics with stable IDs for platform bindings.
- *
- * Example:
+ * Example with lazy transformation:
  * ```
  * val items: DeltaList<Item> = ...
- * val lazyItems = items.lazyMapWithAccess { transform(it) }.withStableLazyIds()
+ * val lazyStableItems = items.lazyMap { transform(it) }.withStableIds()
  *
- * // In Compose:
- * items(lazyItems, key = { it.stableId }) { stableLazyAccess ->
- *     val value = stableLazyAccess.getOrAcquire()
- *     DisposableEffect(stableLazyAccess.stableId) {
- *         onDispose { stableLazyAccess.release() }
- *     }
- *     ...
+ * // Platform adapters handle lifecycle automatically
+ * items(lazyStableItems, key = { it.stableId }) { stableItem ->
+ *     MyCard(stableItem.value)  // auto-acquired, auto-released
  * }
  * ```
  */
-fun <T> DeltaList<LazyAccess<T>>.withStableLazyIds(): DeltaList<StableLazyAccess<T>> = flow {
-    val adapter = StableLazyAccessAdapter<T>()
+fun <T> DeltaList<T>.withStableIds(): DeltaList<StableItem<T>> = flow {
+    val adapter = StableIdAdapter<T>()
 
     collect { delta ->
         emit(adapter.applyDelta(delta))
@@ -82,17 +67,31 @@ internal class StableItemList<T>(
 }
 
 /**
- * Lazy list wrapper for LazyAccess items that adds stable IDs without accessing source items until needed.
- * Uses idMapping.size as the source of truth to ensure consistency between size and get().
+ * LazyList-aware wrapper that adds stable IDs while preserving lazy semantics.
+ * Implements [LazyList] to allow platform adapters to manage item lifecycle.
  */
-internal class StableLazyAccessList<T>(
-    private val source: List<LazyAccess<T>>,
+internal class StableItemLazyList<T>(
+    private val source: LazyList<T>,
     private val idMapping: List<Int>
-) : AbstractList<StableLazyAccess<T>>() {
+) : AbstractList<StableItem<T>>(), LazyList<StableItem<T>> {
     override val size: Int get() = idMapping.size
 
-    override fun get(index: Int): StableLazyAccess<T> =
-        StableLazyAccessImpl(idMapping[index], source[index])
+    override fun get(index: Int): StableItem<T> {
+        // Accessing source[index] auto-acquires the item in the underlying LazyList
+        return StableItemImpl(idMapping[index], source[index])
+    }
+
+    override fun release(index: Int) {
+        source.release(index)
+    }
+
+    override fun releaseAll() {
+        source.releaseAll()
+    }
+
+    override fun isAcquired(index: Int): Boolean {
+        return source.isAcquired(index)
+    }
 }
 
 /**
@@ -101,6 +100,8 @@ internal class StableLazyAccessList<T>(
  * The adapter assigns unique integer IDs to items as they enter the list,
  * and tracks their positions as mutations occur. IDs are session-unique
  * (unique within this adapter instance's lifetime).
+ *
+ * Automatically detects if the source is a [LazyList] and preserves lazy semantics.
  */
 internal class StableIdAdapter<T> {
     private var nextId = 0
@@ -131,7 +132,13 @@ internal class StableIdAdapter<T> {
         }
 
         // Use lazy wrapper list - items are only accessed when get() is called
-        return Delta(StableItemList(delta.items, idMapping.toList()), effectiveChange)
+        // Detect LazyList source and preserve lazy semantics
+        val wrappedList: List<StableItem<T>> = when (val items = delta.items) {
+            is LazyList<T> -> StableItemLazyList(items, idMapping.toList())
+            else -> StableItemList(items, idMapping.toList())
+        }
+
+        return Delta(wrappedList, effectiveChange)
     }
 
     private fun applyMutation(mutation: Mutation) {
@@ -153,62 +160,6 @@ internal class StableIdAdapter<T> {
             }
             is Mutation.Move -> {
                 // Move the ID from one position to another
-                val id = idMapping.removeAt(mutation.fromIndex)
-                idMapping.add(mutation.toIndex, id)
-            }
-        }
-    }
-}
-
-/**
- * Adapter for LazyAccess items with stable IDs.
- */
-internal class StableLazyAccessAdapter<T> {
-    private var nextId = 0
-    private var idMapping = mutableListOf<Int>()
-
-    fun applyDelta(delta: Delta<LazyAccess<T>>): Delta<StableLazyAccess<T>> {
-        // If idMapping is empty, we can't apply mutations - treat as Reload
-        val effectiveChange = if (idMapping.isEmpty() && delta.change !is Change.Reload) {
-            Change.Reload
-        } else {
-            delta.change
-        }
-
-        when (effectiveChange) {
-            is Change.Reload -> {
-                idMapping.clear()
-                repeat(delta.items.size) {
-                    idMapping.add(nextId++)
-                }
-            }
-            is Change.Mutations -> {
-                for (mutation in effectiveChange.operations) {
-                    applyMutation(mutation)
-                }
-            }
-        }
-
-        // Use lazy wrapper list - items are only accessed when get() is called
-        return Delta(StableLazyAccessList(delta.items, idMapping.toList()), effectiveChange)
-    }
-
-    private fun applyMutation(mutation: Mutation) {
-        when (mutation) {
-            is Mutation.Insert -> {
-                for (i in 0 until mutation.count) {
-                    idMapping.add(mutation.index + i, nextId++)
-                }
-            }
-            is Mutation.Remove -> {
-                for (i in 0 until mutation.count) {
-                    idMapping.removeAt(mutation.index)
-                }
-            }
-            is Mutation.Update -> {
-                // IDs don't change on update
-            }
-            is Mutation.Move -> {
                 val id = idMapping.removeAt(mutation.fromIndex)
                 idMapping.add(mutation.toIndex, id)
             }

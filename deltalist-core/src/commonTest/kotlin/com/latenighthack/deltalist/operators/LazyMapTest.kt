@@ -2,7 +2,7 @@ package com.latenighthack.deltalist.operators
 
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
-import com.latenighthack.deltalist.LazyAccess
+import com.latenighthack.deltalist.LazyList
 import com.latenighthack.deltalist.Mutation
 import com.latenighthack.deltalist.mutableDeltaListOf
 import kotlinx.coroutines.delay
@@ -28,30 +28,33 @@ class LazyMapTest {
         return "transformed:$value"
     }
 
+    // Helper to get the LazyList from a delta
+    private fun <T> Delta<T>.lazyList(): LazyList<T> = items as LazyList<T>
+
     // ==================== Basic Acquisition Tests ====================
 
     @Test
     fun acquireComputesAndCachesValue() = runTest {
         resetTransformCount()
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { countingTransform(it) }
+        val lazy = source.lazyMap { countingTransform(it) }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
-        // Access item at index 1
-        val access = results[0].items[1]
-        assertFalse(access.isAcquired)
+        val lazyList = results[0].lazyList()
+        assertFalse(lazyList.isAcquired(1))
 
-        val value = access.getOrAcquire()
+        // Access item at index 1 (auto-acquires)
+        val value = results[0].items[1]
         assertEquals("transformed:b", value)
-        assertTrue(access.isAcquired)
+        assertTrue(lazyList.isAcquired(1))
         assertEquals(1, transformCallCount)
 
         // Access again - should return same value without recomputing
-        val value2 = access.getOrAcquire()
+        val value2 = results[0].items[1]
         assertSame(value, value2)
         assertEquals(1, transformCallCount) // Still 1, not recomputed
 
@@ -62,25 +65,25 @@ class LazyMapTest {
     fun releaseFreesCache() = runTest {
         resetTransformCount()
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { countingTransform(it) }
+        val lazy = source.lazyMap { countingTransform(it) }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
-        val access = results[0].items[1]
-        access.getOrAcquire()
-        assertTrue(access.isAcquired)
+        val lazyList = results[0].lazyList()
+        results[0].items[1] // Acquire
+        assertTrue(lazyList.isAcquired(1))
         assertEquals(1, transformCallCount)
 
         // Release
-        access.release()
-        assertFalse(access.isAcquired)
+        lazyList.release(1)
+        assertFalse(lazyList.isAcquired(1))
 
         // Acquire again - should recompute
-        access.getOrAcquire()
-        assertTrue(access.isAcquired)
+        results[0].items[1]
+        assertTrue(lazyList.isAcquired(1))
         assertEquals(2, transformCallCount) // Now 2, recomputed
 
         job.cancel()
@@ -90,28 +93,28 @@ class LazyMapTest {
     fun multipleItemsCanBeAcquiredIndependently() = runTest {
         resetTransformCount()
         val source = mutableDeltaListOf(listOf("a", "b", "c", "d", "e"))
-        val lazy = source.lazyMapWithAccess { countingTransform(it) }
+        val lazy = source.lazyMap { countingTransform(it) }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
-        val items = results[0].items
+        val lazyList = results[0].lazyList()
 
         // Acquire indices 1 and 3
-        items[1].getOrAcquire()
-        items[3].getOrAcquire()
+        results[0].items[1]
+        results[0].items[3]
 
-        assertTrue(items[1].isAcquired)
-        assertFalse(items[2].isAcquired)
-        assertTrue(items[3].isAcquired)
+        assertTrue(lazyList.isAcquired(1))
+        assertFalse(lazyList.isAcquired(2))
+        assertTrue(lazyList.isAcquired(3))
         assertEquals(2, transformCallCount)
 
         // Release index 1
-        items[1].release()
-        assertFalse(items[1].isAcquired)
-        assertTrue(items[3].isAcquired)
+        lazyList.release(1)
+        assertFalse(lazyList.isAcquired(1))
+        assertTrue(lazyList.isAcquired(3))
 
         job.cancel()
     }
@@ -122,15 +125,15 @@ class LazyMapTest {
     fun insertShiftsAcquiredIndicesUp() = runTest {
         resetTransformCount()
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { countingTransform(it) }
+        val lazy = source.lazyMap { countingTransform(it) }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "b" at index 1
-        val valueB = results[0].items[1].getOrAcquire()
+        val valueB = results[0].items[1]
         assertEquals("transformed:b", valueB)
         assertEquals(1, transformCallCount)
 
@@ -142,14 +145,14 @@ class LazyMapTest {
         assertEquals(4, results[1].items.size)
 
         // Index 2 should still have the cached value for "b"
-        val access2 = results[1].items[2]
-        assertTrue(access2.isAcquired)
-        val value2 = access2.getOrAcquire()
+        val lazyList = results[1].lazyList()
+        assertTrue(lazyList.isAcquired(2))
+        val value2 = results[1].items[2]
         assertEquals("transformed:b", value2)
         assertEquals(1, transformCallCount) // No recompute
 
         // Index 1 (the old position) should now be "a", not acquired
-        assertFalse(results[1].items[1].isAcquired)
+        assertFalse(lazyList.isAcquired(1))
 
         job.cancel()
     }
@@ -157,25 +160,29 @@ class LazyMapTest {
     @Test
     fun insertBeforeAcquiredItemPreservesCache() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire all items
-        results[0].items.forEach { it.getOrAcquire() }
+        results[0].items.forEach { _ -> } // Access all to acquire
+        results[0].items[0]
+        results[0].items[1]
+        results[0].items[2]
 
         // Insert at beginning
         source.insert(0, "x")
         delay(50)
 
+        val lazyList = results[1].lazyList()
         // Original items should have shifted
-        assertEquals("t:x", results[1].items[0].getOrAcquire())
-        assertTrue(results[1].items[1].isAcquired) // "a" shifted to index 1
-        assertTrue(results[1].items[2].isAcquired) // "b" shifted to index 2
-        assertTrue(results[1].items[3].isAcquired) // "c" shifted to index 3
+        assertEquals("t:x", results[1].items[0])
+        assertTrue(lazyList.isAcquired(1)) // "a" shifted to index 1
+        assertTrue(lazyList.isAcquired(2)) // "b" shifted to index 2
+        assertTrue(lazyList.isAcquired(3)) // "c" shifted to index 3
 
         job.cancel()
     }
@@ -183,23 +190,24 @@ class LazyMapTest {
     @Test
     fun insertAfterAcquiredItemPreservesCache() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire item at index 0
-        results[0].items[0].getOrAcquire()
+        results[0].items[0]
 
         // Insert at end
         source.append("x")
         delay(50)
 
         // Item at index 0 should still be acquired
-        assertTrue(results[1].items[0].isAcquired)
-        assertEquals("t:a", results[1].items[0].getOrAcquire())
+        val lazyList = results[1].lazyList()
+        assertTrue(lazyList.isAcquired(0))
+        assertEquals("t:a", results[1].items[0])
 
         job.cancel()
     }
@@ -209,25 +217,26 @@ class LazyMapTest {
     @Test
     fun removeDiscardsAcquiredItem() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "b" at index 1
-        results[0].items[1].getOrAcquire()
-        assertTrue(results[0].items[1].isAcquired)
+        results[0].items[1]
+        assertTrue(results[0].lazyList().isAcquired(1))
 
         // Remove "b"
         source.removeAt(1)
         delay(50)
 
         // New list should have 2 items, none acquired at index 1 (which is now "c")
+        val lazyList = results[1].lazyList()
         assertEquals(2, results[1].items.size)
-        assertFalse(results[1].items[1].isAcquired)
-        assertEquals("t:c", results[1].items[1].getOrAcquire())
+        assertFalse(lazyList.isAcquired(1))
+        assertEquals("t:c", results[1].items[1])
 
         job.cancel()
     }
@@ -235,28 +244,29 @@ class LazyMapTest {
     @Test
     fun removeShiftsAcquiredIndicesDown() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c", "d"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "c" at index 2 and "d" at index 3
-        results[0].items[2].getOrAcquire()
-        results[0].items[3].getOrAcquire()
+        results[0].items[2]
+        results[0].items[3]
 
         // Remove "a" at index 0
         source.removeAt(0)
         delay(50)
 
+        val lazyList = results[1].lazyList()
         // "c" should now be at index 1 (was 2), still acquired
-        assertTrue(results[1].items[1].isAcquired)
-        assertEquals("t:c", results[1].items[1].getOrAcquire())
+        assertTrue(lazyList.isAcquired(1))
+        assertEquals("t:c", results[1].items[1])
 
         // "d" should now be at index 2 (was 3), still acquired
-        assertTrue(results[1].items[2].isAcquired)
-        assertEquals("t:d", results[1].items[2].getOrAcquire())
+        assertTrue(lazyList.isAcquired(2))
+        assertEquals("t:d", results[1].items[2])
 
         job.cancel()
     }
@@ -264,24 +274,25 @@ class LazyMapTest {
     @Test
     fun removeMultipleItemsShiftsCorrectly() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c", "d", "e"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "e" at index 4
-        results[0].items[4].getOrAcquire()
+        results[0].items[4]
 
         // Remove indices 1 and 2 ("b" and "c")
         source.removeRange(1, 2)
         delay(50)
 
+        val lazyList = results[1].lazyList()
         // "e" should now be at index 2 (was 4, shifted down by 2)
         assertEquals(3, results[1].items.size)
-        assertTrue(results[1].items[2].isAcquired)
-        assertEquals("t:e", results[1].items[2].getOrAcquire())
+        assertTrue(lazyList.isAcquired(2))
+        assertEquals("t:e", results[1].items[2])
 
         job.cancel()
     }
@@ -292,15 +303,15 @@ class LazyMapTest {
     fun updateRecomputesAcquiredItem() = runTest {
         resetTransformCount()
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { countingTransform(it) }
+        val lazy = source.lazyMap { countingTransform(it) }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "b" at index 1
-        val valueB = results[0].items[1].getOrAcquire()
+        val valueB = results[0].items[1]
         assertEquals("transformed:b", valueB)
         assertEquals(1, transformCallCount)
 
@@ -309,9 +320,10 @@ class LazyMapTest {
         delay(50)
 
         // Should have recomputed
+        val lazyList = results[1].lazyList()
         assertEquals(2, transformCallCount)
-        assertTrue(results[1].items[1].isAcquired)
-        assertEquals("transformed:B", results[1].items[1].getOrAcquire())
+        assertTrue(lazyList.isAcquired(1))
+        assertEquals("transformed:B", results[1].items[1])
         assertEquals(2, transformCallCount) // No additional compute
 
         job.cancel()
@@ -321,9 +333,9 @@ class LazyMapTest {
     fun updateNonAcquiredItemDoesNotCompute() = runTest {
         resetTransformCount()
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { countingTransform(it) }
+        val lazy = source.lazyMap { countingTransform(it) }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
@@ -337,7 +349,7 @@ class LazyMapTest {
 
         // Should not have computed anything
         assertEquals(0, transformCallCount)
-        assertFalse(results[1].items[1].isAcquired)
+        assertFalse(results[1].lazyList().isAcquired(1))
 
         job.cancel()
     }
@@ -347,28 +359,29 @@ class LazyMapTest {
     @Test
     fun moveAcquiredItemForward() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c", "d"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "a" at index 0
-        val valueA = results[0].items[0].getOrAcquire()
+        val valueA = results[0].items[0]
         assertEquals("t:a", valueA)
 
         // Move "a" from index 0 to index 3
         source.move(0, 3)
         delay(50)
 
+        val lazyList = results[1].lazyList()
         // "a" should now be at index 3, still acquired
-        assertTrue(results[1].items[3].isAcquired)
-        assertEquals("t:a", results[1].items[3].getOrAcquire())
+        assertTrue(lazyList.isAcquired(3))
+        assertEquals("t:a", results[1].items[3])
 
         // Index 0 should now be "b", not acquired
-        assertFalse(results[1].items[0].isAcquired)
-        assertEquals("t:b", results[1].items[0].getOrAcquire())
+        assertFalse(lazyList.isAcquired(0))
+        assertEquals("t:b", results[1].items[0])
 
         job.cancel()
     }
@@ -376,27 +389,28 @@ class LazyMapTest {
     @Test
     fun moveAcquiredItemBackward() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c", "d"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "d" at index 3
-        val valueD = results[0].items[3].getOrAcquire()
+        val valueD = results[0].items[3]
         assertEquals("t:d", valueD)
 
         // Move "d" from index 3 to index 0
         source.move(3, 0)
         delay(50)
 
+        val lazyList = results[1].lazyList()
         // "d" should now be at index 0, still acquired
-        assertTrue(results[1].items[0].isAcquired)
-        assertEquals("t:d", results[1].items[0].getOrAcquire())
+        assertTrue(lazyList.isAcquired(0))
+        assertEquals("t:d", results[1].items[0])
 
         // Index 3 should now be "c", not acquired
-        assertFalse(results[1].items[3].isAcquired)
+        assertFalse(lazyList.isAcquired(3))
 
         job.cancel()
     }
@@ -404,15 +418,15 @@ class LazyMapTest {
     @Test
     fun moveAffectsIntermediateAcquiredItems() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c", "d", "e"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "c" at index 2
-        results[0].items[2].getOrAcquire()
+        results[0].items[2]
 
         // Move "a" from index 0 to index 4
         // Original: a b c d e -> b c d e a
@@ -420,8 +434,9 @@ class LazyMapTest {
         source.move(0, 4)
         delay(50)
 
-        assertTrue(results[1].items[1].isAcquired)
-        assertEquals("t:c", results[1].items[1].getOrAcquire())
+        val lazyList = results[1].lazyList()
+        assertTrue(lazyList.isAcquired(1))
+        assertEquals("t:c", results[1].items[1])
 
         job.cancel()
     }
@@ -431,24 +446,29 @@ class LazyMapTest {
     @Test
     fun reloadClearsAllAcquiredItems() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire all items
-        results[0].items.forEach { it.getOrAcquire() }
-        assertTrue(results[0].items.all { it.isAcquired })
+        results[0].items.forEach { _ -> }
+        results[0].items[0]
+        results[0].items[1]
+        results[0].items[2]
+        val lazyList0 = results[0].lazyList()
+        assertTrue(lazyList0.isAcquired(0) && lazyList0.isAcquired(1) && lazyList0.isAcquired(2))
 
         // Reload with new data
         source.reload(listOf("x", "y", "z"))
         delay(50)
 
         // All items should be not acquired
-        assertTrue(results[1].items.none { it.isAcquired })
-        assertEquals("t:x", results[1].items[0].getOrAcquire())
+        val lazyList1 = results[1].lazyList()
+        assertTrue(!lazyList1.isAcquired(0) && !lazyList1.isAcquired(1) && !lazyList1.isAcquired(2))
+        assertEquals("t:x", results[1].items[0])
 
         job.cancel()
     }
@@ -458,34 +478,34 @@ class LazyMapTest {
     @Test
     fun multipleSequentialMutationsTrackCorrectly() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c", "d", "e"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "c" at index 2
-        results[0].items[2].getOrAcquire()
+        results[0].items[2]
 
         // Insert at beginning: x a b c d e
         // "c" should move from 2 to 3
         source.insert(0, "x")
         delay(50)
-        assertTrue(results[1].items[3].isAcquired)
+        assertTrue(results[1].lazyList().isAcquired(3))
 
         // Remove "a" (now at index 1): x b c d e
         // "c" should move from 3 to 2
         source.removeAt(1)
         delay(50)
-        assertTrue(results[2].items[2].isAcquired)
-        assertEquals("t:c", results[2].items[2].getOrAcquire())
+        assertTrue(results[2].lazyList().isAcquired(2))
+        assertEquals("t:c", results[2].items[2])
 
         // Insert at end: x b c d e y
         // "c" should stay at 2
         source.append("y")
         delay(50)
-        assertTrue(results[3].items[2].isAcquired)
+        assertTrue(results[3].lazyList().isAcquired(2))
 
         job.cancel()
     }
@@ -493,17 +513,17 @@ class LazyMapTest {
     @Test
     fun batchMutationsTrackCorrectly() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c", "d", "e"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire items at indices 1, 2, 3
-        results[0].items[1].getOrAcquire()
-        results[0].items[2].getOrAcquire()
-        results[0].items[3].getOrAcquire()
+        results[0].items[1]
+        results[0].items[2]
+        results[0].items[3]
 
         // Batch: insert at 0, remove at 4 (after shift, this is "e")
         source.update { list ->
@@ -514,10 +534,11 @@ class LazyMapTest {
 
         // After insert at 0: x a b c d e (acquired shifted: 2, 3, 4)
         // After remove at 5: x a b c d (acquired: 2, 3, 4)
+        val lazyList = results[1].lazyList()
         assertEquals(5, results[1].items.size)
-        assertTrue(results[1].items[2].isAcquired) // "b"
-        assertTrue(results[1].items[3].isAcquired) // "c"
-        assertTrue(results[1].items[4].isAcquired) // "d"
+        assertTrue(lazyList.isAcquired(2)) // "b"
+        assertTrue(lazyList.isAcquired(3)) // "c"
+        assertTrue(lazyList.isAcquired(4)) // "d"
 
         job.cancel()
     }
@@ -530,22 +551,22 @@ class LazyMapTest {
         data class Wrapper(val value: String)
 
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { Wrapper(it) }
+        val lazy = source.lazyMap { Wrapper(it) }
 
-        val results = mutableListOf<Delta<LazyAccess<Wrapper>>>()
+        val results = mutableListOf<Delta<Wrapper>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "b" at index 1
-        val wrapper1 = results[0].items[1].getOrAcquire()
+        val wrapper1 = results[0].items[1]
 
         // Insert at beginning - "b" moves to index 2
         source.insert(0, "x")
         delay(50)
 
         // Get the wrapper at new position - should be same object
-        val wrapper2 = results[1].items[2].getOrAcquire()
+        val wrapper2 = results[1].items[2]
         assertSame(wrapper1, wrapper2)
 
         job.cancel()
@@ -556,24 +577,22 @@ class LazyMapTest {
         data class Wrapper(val value: String)
 
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { Wrapper(it) }
+        val lazy = source.lazyMap { Wrapper(it) }
 
-        val results = mutableListOf<Delta<LazyAccess<Wrapper>>>()
+        val results = mutableListOf<Delta<Wrapper>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
 
         // Acquire "b"
-        val wrapper1 = results[0].items[1].getOrAcquire()
+        val wrapper1 = results[0].items[1]
 
         // Release
-        results[0].items[1].release()
+        results[0].lazyList().release(1)
 
         // Re-acquire - should be different object instance
-        val wrapper2 = results[0].items[1].getOrAcquire()
+        val wrapper2 = results[0].items[1]
         assertEquals(wrapper1, wrapper2) // Equal by value
-        // Note: Can't guarantee different identity for data classes due to caching
-        // but the transform function was called again
 
         job.cancel()
     }
@@ -583,9 +602,9 @@ class LazyMapTest {
     @Test
     fun emptyListHandledCorrectly() = runTest {
         val source = mutableDeltaListOf<String>(emptyList())
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        val results = mutableListOf<Delta<LazyAccess<String>>>()
+        val results = mutableListOf<Delta<String>>()
         val job = launch { lazy.collect { results.add(it) } }
 
         delay(50)
@@ -606,9 +625,9 @@ class LazyMapTest {
     @Test
     fun acquireAfterMutationWorksCorrectly() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        var latestDelta: Delta<LazyAccess<String>>? = null
+        var latestDelta: Delta<String>? = null
         val job = launch { lazy.collect { latestDelta = it } }
 
         delay(50)
@@ -618,9 +637,9 @@ class LazyMapTest {
         delay(50)
 
         // Now acquire from the updated list
-        val access = latestDelta!!.items[2] // "b" shifted to index 2
-        assertEquals("t:b", access.getOrAcquire())
-        assertTrue(access.isAcquired)
+        val value = latestDelta!!.items[2] // "b" shifted to index 2
+        assertEquals("t:b", value)
+        assertTrue(latestDelta!!.lazyList().isAcquired(2))
 
         job.cancel()
     }
@@ -630,9 +649,9 @@ class LazyMapTest {
     @Test
     fun concurrentAcquiresOnSameIndex() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        var latestDelta: Delta<LazyAccess<String>>? = null
+        var latestDelta: Delta<String>? = null
         val job = launch { lazy.collect { latestDelta = it } }
 
         delay(50)
@@ -641,7 +660,7 @@ class LazyMapTest {
         val results = mutableListOf<String>()
         val jobs = (1..10).map {
             launch {
-                val value = latestDelta!!.items[1].getOrAcquire()
+                val value = latestDelta!!.items[1]
                 synchronized(results) { results.add(value) }
             }
         }
@@ -657,26 +676,26 @@ class LazyMapTest {
     @Test
     fun concurrentAcquireAndRelease() = runTest {
         val source = mutableDeltaListOf(listOf("a", "b", "c"))
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        var latestDelta: Delta<LazyAccess<String>>? = null
+        var latestDelta: Delta<String>? = null
         val job = launch { lazy.collect { latestDelta = it } }
 
         delay(50)
 
         // Acquire
-        latestDelta!!.items[1].getOrAcquire()
-        assertTrue(latestDelta!!.items[1].isAcquired)
+        latestDelta!!.items[1]
+        assertTrue(latestDelta!!.lazyList().isAcquired(1))
 
         // Concurrent release and acquire
         val jobs = listOf(
-            launch { latestDelta!!.items[1].release() },
-            launch { latestDelta!!.items[1].getOrAcquire() }
+            launch { latestDelta!!.lazyList().release(1) },
+            launch { latestDelta!!.items[1] }
         )
         jobs.forEach { it.join() }
 
         // State should be consistent (either acquired or not)
-        val finalState = latestDelta!!.items[1].isAcquired
+        val finalState = latestDelta!!.lazyList().isAcquired(1)
         // Just verify no crash and state is valid boolean
         assertTrue(finalState || !finalState)
 
@@ -687,22 +706,22 @@ class LazyMapTest {
     fun acquireDuringDeltaApplication() = runTest {
         resetTransformCount()
         val source = mutableDeltaListOf(listOf("a", "b", "c", "d", "e"))
-        val lazy = source.lazyMapWithAccess { countingTransform(it) }
+        val lazy = source.lazyMap { countingTransform(it) }
 
-        var latestDelta: Delta<LazyAccess<String>>? = null
+        var latestDelta: Delta<String>? = null
         val job = launch { lazy.collect { latestDelta = it } }
 
         delay(50)
 
         // Acquire middle item
-        val value1 = latestDelta!!.items[2].getOrAcquire()
+        val value1 = latestDelta!!.items[2]
         assertEquals("transformed:c", value1)
 
         // Start acquiring while also inserting
         val acquireJob = launch {
             repeat(100) {
                 try {
-                    latestDelta?.items?.getOrNull(2)?.getOrAcquire()
+                    latestDelta?.items?.getOrNull(2)
                 } catch (e: IndexOutOfBoundsException) {
                     // Expected if list shrinks
                 }
@@ -729,16 +748,16 @@ class LazyMapTest {
     @Test
     fun stressTestConcurrentOperations() = runTest {
         val source = mutableDeltaListOf((0..99).map { "item$it" })
-        val lazy = source.lazyMapWithAccess { "t:$it" }
+        val lazy = source.lazyMap { "t:$it" }
 
-        var latestDelta: Delta<LazyAccess<String>>? = null
+        var latestDelta: Delta<String>? = null
         val collectJob = launch { lazy.collect { latestDelta = it } }
 
         delay(50)
 
         // Acquire every 10th item
         (0..9).forEach { i ->
-            latestDelta!!.items[i * 10].getOrAcquire()
+            latestDelta!!.items[i * 10]
         }
 
         // Concurrent mutations and accesses
@@ -763,7 +782,7 @@ class LazyMapTest {
                 repeat(50) {
                     try {
                         val idx = (0 until (latestDelta?.items?.size ?: 1)).random()
-                        latestDelta?.items?.getOrNull(idx)?.getOrAcquire()
+                        latestDelta?.items?.getOrNull(idx)
                     } catch (e: Exception) {
                         // Ignore bounds exceptions during mutations
                     }
@@ -778,7 +797,7 @@ class LazyMapTest {
                 repeat(30) {
                     try {
                         val idx = (0 until (latestDelta?.items?.size ?: 1)).random()
-                        latestDelta?.items?.getOrNull(idx)?.release()
+                        (latestDelta?.items as? LazyList<*>)?.release(idx)
                     } catch (e: Exception) {
                         // Ignore
                     }
@@ -794,9 +813,9 @@ class LazyMapTest {
         assertTrue(finalDelta.items.size > 0)
 
         // All acquired items should have valid values
-        finalDelta.items.forEachIndexed { idx, access ->
-            if (access.isAcquired) {
-                val value = access.getOrAcquire()
+        val lazyList = finalDelta.lazyList()
+        finalDelta.items.forEachIndexed { idx, value ->
+            if (lazyList.isAcquired(idx)) {
                 assertTrue(value.startsWith("t:"))
             }
         }

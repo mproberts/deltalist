@@ -6,10 +6,12 @@ import androidx.recyclerview.widget.RecyclerView
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
+import com.latenighthack.deltalist.LazyList
 import com.latenighthack.deltalist.Mutation
 import com.latenighthack.deltalist.SoftValue
 import com.latenighthack.deltalist.StableItem
-import com.latenighthack.deltalist.StableLazyAccess
+import com.latenighthack.deltalist.releaseAllIfLazy
+import com.latenighthack.deltalist.releaseIfLazy
 import com.latenighthack.deltalist.softGetOrNull
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -21,9 +23,16 @@ import kotlinx.coroutines.launch
  * Delta mutations are automatically applied as efficient RecyclerView notifications.
  *
  * ## Stable IDs
- * When the item type is [StableItem] or [StableLazyAccess], stable IDs are automatically
- * enabled and [getItemId] returns the stable ID. Otherwise, override [getItemId] manually
+ * When the item type is [StableItem], stable IDs are automatically enabled and
+ * [getItemId] returns the stable ID. Otherwise, override [getItemId] manually
  * and call [setHasStableIds(true)] if you need stable IDs.
+ *
+ * ## Lazy List Support
+ * When the underlying list is a [LazyList] (e.g., from [lazyMap().withStableIds()]),
+ * this adapter automatically manages item lifecycle:
+ * - Items are acquired when accessed via [getItem]
+ * - Items are released when views are detached or recycled
+ * - All items are released when [unbind] is called
  *
  * ## View Types
  * Override [getItemViewType] to support multiple view types. Access items via the
@@ -42,6 +51,16 @@ import kotlinx.coroutines.launch
  *     }
  * }
  * ```
+ *
+ * Example with lazy transformation:
+ * ```kotlin
+ * val items = source.lazyMap { transform(it) }.withStableIds()
+ *
+ * class MyAdapter(deltaList: DeltaList<StableItem<TransformedData>>) :
+ *     DeltaAdapter<StableItem<TransformedData>, MyViewHolder>(deltaList) {
+ *     // ... lifecycle is managed automatically
+ * }
+ * ```
  */
 abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
     private val deltaList: DeltaList<T>
@@ -49,6 +68,8 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
 
     /**
      * The current list of items. Updated automatically when deltas are received.
+     *
+     * When backed by a [LazyList], accessing items via index will auto-acquire them.
      */
     protected var items: List<T> = emptyList()
         private set
@@ -59,7 +80,6 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
     private enum class StableIdMode {
         Unknown,
         StableItem,
-        StableLazyAccess,
         None
     }
 
@@ -78,11 +98,14 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
     }
 
     /**
-     * Stops collecting deltas. Call this when the adapter is no longer needed.
+     * Stops collecting deltas and releases all lazy items.
+     * Call this when the adapter is no longer needed.
      */
     fun unbind() {
         job?.cancel()
         job = null
+        // Release all lazy items when unbinding
+        items.releaseAllIfLazy()
     }
 
     private fun applyDelta(delta: Delta<T>) {
@@ -92,10 +115,9 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
         if (stableIdMode == StableIdMode.Unknown && items.isNotEmpty()) {
             stableIdMode = when (items.first()) {
                 is StableItem<*> -> StableIdMode.StableItem
-                is StableLazyAccess<*> -> StableIdMode.StableLazyAccess
                 else -> StableIdMode.None
             }
-            if (stableIdMode != StableIdMode.None) {
+            if (stableIdMode == StableIdMode.StableItem) {
                 setHasStableIds(true)
             }
         }
@@ -126,6 +148,8 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
      * This is useful for subclasses in [onBindViewHolder] and for external code
      * that needs to access items (e.g., ItemTouchHelper callbacks).
      *
+     * When backed by a [LazyList], this will auto-acquire the item if not already cached.
+     *
      * Note: For paginated lists, this may trigger a fetch for unloaded items.
      * Use [softGetItem] if you need to check loading state without side effects.
      */
@@ -150,15 +174,42 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
     /**
      * Returns the stable ID for the item at the given position.
      *
-     * When items are [StableItem] or [StableLazyAccess], this automatically returns
-     * their stable ID. Otherwise, returns [RecyclerView.NO_ID] by default.
+     * When items are [StableItem], this automatically returns their stable ID.
+     * Otherwise, returns [RecyclerView.NO_ID] by default.
      * Override this method if you need custom stable ID logic.
      */
     override fun getItemId(position: Int): Long {
         return when (stableIdMode) {
             StableIdMode.StableItem -> (items[position] as StableItem<*>).stableId.toLong()
-            StableIdMode.StableLazyAccess -> (items[position] as StableLazyAccess<*>).stableId.toLong()
             else -> RecyclerView.NO_ID
+        }
+    }
+
+    /**
+     * Called when a view is detached from the window.
+     * Releases the lazy item at this position to free memory.
+     *
+     * Subclasses can override but must call super.
+     */
+    override fun onViewDetachedFromWindow(holder: VH) {
+        super.onViewDetachedFromWindow(holder)
+        val position = holder.bindingAdapterPosition
+        if (position != RecyclerView.NO_POSITION) {
+            items.releaseIfLazy(position)
+        }
+    }
+
+    /**
+     * Called when a view is recycled.
+     * Releases the lazy item at this position to free memory.
+     *
+     * Subclasses can override but must call super.
+     */
+    override fun onViewRecycled(holder: VH) {
+        super.onViewRecycled(holder)
+        val position = holder.bindingAdapterPosition
+        if (position != RecyclerView.NO_POSITION) {
+            items.releaseIfLazy(position)
         }
     }
 }

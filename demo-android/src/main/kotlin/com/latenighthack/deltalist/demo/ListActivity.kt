@@ -39,11 +39,13 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.latenighthack.deltalist.DeltaList
-import com.latenighthack.deltalist.StableLazyAccess
+import com.latenighthack.deltalist.LazyList
+import com.latenighthack.deltalist.StableItem
 import com.latenighthack.deltalist.android.compose.collectAsDeltaState
 import com.latenighthack.deltalist.android.compose.rememberItemState
 import com.latenighthack.deltalist.android.recyclerview.FlowDeltaAdapter
 import com.latenighthack.deltalist.demo.ui.theme.DeltaListDemoTheme
+import com.latenighthack.deltalist.releaseIfLazy
 
 class ListActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,10 +102,13 @@ private fun ListComposeContent(viewModel: ListViewModel) {
         LazyColumn(modifier = Modifier.weight(1f)) {
             items(
                 items = delta.items,
-                key = { stableLazyAccess -> stableLazyAccess.stableId }
-            ) { stableLazyAccess ->
+                key = { stableItem -> stableItem.stableId }
+            ) { stableItem ->
+                // Clean API: stableItem.value gives us the TickingItem directly
+                // LazyList release is handled automatically via DisposableEffect
                 LazyTickingItemCard(
-                    stableLazyAccess = stableLazyAccess,
+                    items = delta.items,
+                    stableItem = stableItem,
                     isSelected = { id -> id == selectedId },
                     onClick = { id ->
                         selectedId = if (selectedId == id) null else id
@@ -134,17 +139,30 @@ private fun ListComposeContent(viewModel: ListViewModel) {
 
 @Composable
 private fun LazyTickingItemCard(
-    stableLazyAccess: StableLazyAccess<TickingItem>,
+    items: List<StableItem<TickingItem>>,
+    stableItem: StableItem<TickingItem>,
     isSelected: (String) -> Boolean,
     onClick: (String) -> Unit
 ) {
-    val stableId = stableLazyAccess.stableId
-    val tickingItem = remember(stableId) { stableLazyAccess.getOrAcquire() }
+    val stableId = stableItem.stableId
+    // Clean API: access the value directly (auto-acquired by LazyList)
+    val tickingItem = stableItem.value
 
-    DisposableEffect(stableId) {
-        onDispose {
-            tickingItem.stop()
-            stableLazyAccess.release()
+    // Handle release when item leaves composition
+    // The LazyList will release the cached transformation
+    if (items is LazyList<*>) {
+        val index = items.indexOf(stableItem)
+        DisposableEffect(stableId) {
+            onDispose {
+                tickingItem.stop()
+                items.releaseIfLazy(index)
+            }
+        }
+    } else {
+        DisposableEffect(stableId) {
+            onDispose {
+                tickingItem.stop()
+            }
         }
     }
 
@@ -274,17 +292,18 @@ private fun ListControlButtons(
 }
 
 // RecyclerView Adapter using FlowDeltaAdapter
-// FlowDeltaAdapter automatically handles flow lifecycle (start on attach, stop on detach)
-// We use the lifecycle hooks to manage LazyAccess acquisition/release
+// Clean API: Uses StableItem<TickingItem> instead of StableLazyAccess<TickingItem>
+// Lazy lifecycle is managed automatically by DeltaAdapter base class
 private class TickingItemAdapter(
-    deltaList: DeltaList<StableLazyAccess<TickingItem>>,
+    deltaList: DeltaList<StableItem<TickingItem>>,
     private val onItemClick: (Int) -> Unit
-) : FlowDeltaAdapter<StableLazyAccess<TickingItem>, Int, TickingItemAdapter.TickingItemViewHolder>(
+) : FlowDeltaAdapter<StableItem<TickingItem>, Int, TickingItemAdapter.TickingItemViewHolder>(
     deltaList,
-    flowAccessor = { stableLazyAccess -> stableLazyAccess.getOrAcquire().tickCount }
+    // Clean API: access stableItem.value directly (auto-acquired)
+    flowAccessor = { stableItem -> stableItem.value.tickCount }
 ) {
-    // Track acquired items to release them when flow stops
-    private val acquiredItems = mutableMapOf<TickingItemViewHolder, Pair<StableLazyAccess<TickingItem>, TickingItem>>()
+    // Track ticking items to stop them when flow stops
+    private val tickingItems = mutableMapOf<TickingItemViewHolder, TickingItem>()
 
     var selectedIndex: Int = -1
         set(value) {
@@ -314,8 +333,9 @@ private class TickingItemAdapter(
     }
 
     // Called on bind - set up static content only
-    override fun onBindItem(holder: TickingItemViewHolder, position: Int, item: StableLazyAccess<TickingItem>) {
-        val tickingItem = item.getOrAcquire()
+    // Clean API: use stableItem.value directly (auto-acquired by LazyList)
+    override fun onBindItem(holder: TickingItemViewHolder, position: Int, item: StableItem<TickingItem>) {
+        val tickingItem = item.value  // Auto-acquired
         holder.titleView.text = tickingItem.item.title
         holder.tickView.text = "Ticks: ${tickingItem.tickCount.value} | StableId: ${item.stableId}"
         holder.stableId = item.stableId
@@ -331,22 +351,20 @@ private class TickingItemAdapter(
         holder.tickView.text = "Ticks: $state | StableId: ${holder.stableId}"
     }
 
-    // Called when flow starts (view attached) - track acquired item for later release
+    // Called when flow starts (view attached) - track ticking item for later stop
     override fun onItemFlowStarted(holder: TickingItemViewHolder) {
         val position = holder.bindingAdapterPosition
         if (position != RecyclerView.NO_POSITION) {
-            val stableLazyAccess = getItem(position)
-            val tickingItem = stableLazyAccess.getOrAcquire()
-            acquiredItems[holder] = stableLazyAccess to tickingItem
+            val stableItem = getItem(position)
+            val tickingItem = stableItem.value  // Auto-acquired
+            tickingItems[holder] = tickingItem
         }
     }
 
-    // Called when flow stops (view detached/recycled) - release acquired item
+    // Called when flow stops (view detached/recycled) - stop ticking item
+    // Note: LazyList release is handled automatically by DeltaAdapter base class
     override fun onItemFlowStopped(holder: TickingItemViewHolder) {
-        acquiredItems.remove(holder)?.let { (stableLazyAccess, tickingItem) ->
-            tickingItem.stop()
-            stableLazyAccess.release()
-        }
+        tickingItems.remove(holder)?.stop()
     }
 
     class TickingItemViewHolder(

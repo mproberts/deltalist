@@ -7,7 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import com.latenighthack.deltalist.LazyAccess
+import com.latenighthack.deltalist.LazyList
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collectLatest
 
@@ -98,67 +98,68 @@ fun <T, S : Any> rememberItemStateOrNull(
 ): S? = rememberItemState(item, key, null, flowAccessor)
 
 /**
- * Combines [LazyAccess] acquisition lifecycle with flow collection.
+ * Collects a flow from a lazy item with automatic lazy lifecycle management.
  *
- * This helper:
- * 1. Acquires the lazy item on composition
- * 2. Collects the flow from the acquired item
- * 3. Releases the lazy item on disposal
- *
- * Use this for items wrapped in [LazyAccess] that also expose flows.
+ * When the list is a [LazyList] (e.g., from [lazyMap().withStableIds()]):
+ * - The item is accessed via index (auto-acquired)
+ * - The item is released when the composable leaves composition
+ * - The flow is collected while in composition
  *
  * Example:
  * ```kotlin
  * @Composable
- * fun LazyTickingCard(access: LazyAccess<TickingItem>) {
- *     val tickCount = rememberLazyItemState(
- *         access = access,
- *         key = (access as StableLazyAccess).stableId,
+ * fun LazyTickingCard(
+ *     items: List<StableItem<TickingItem>>,
+ *     index: Int,
+ *     stableId: Int
+ * ) {
+ *     val tickCount = items.rememberLazyItemState(
+ *         index = index,
+ *         key = stableId,
  *         initialValue = 0
- *     ) { it.tickCount }
+ *     ) { stableItem -> stableItem.value.tickCount }
  *
  *     Card {
- *         Text("Ticks: $tickCount")
+ *         Text("Ticks: $tickCount | StableId: $stableId")
  *     }
  * }
  * ```
  *
- * @param access The [LazyAccess] wrapper for the item
+ * @param index The index of the item in the list
  * @param key Key for recomposition identity
  * @param initialValue Initial state before first emission
- * @param flowAccessor Function to extract the [Flow] from the acquired item
+ * @param flowAccessor Function to extract the [Flow] from the item
  * @return The current state value, updated as the flow emits
  */
 @Composable
-fun <T, S> rememberLazyItemState(
-    access: LazyAccess<T>,
+fun <T, S> List<T>.rememberLazyItemState(
+    index: Int,
     key: Any,
     initialValue: S,
     flowAccessor: (T) -> Flow<S>
 ): S {
-    val item = remember(key) { access.getOrAcquire() }
+    val item = remember(key) { this[index] }
 
-    DisposableEffect(key) {
-        onDispose { access.release() }
+    if (this is LazyList<T>) {
+        DisposableEffect(key) {
+            onDispose { release(index) }
+        }
     }
 
     return rememberItemState(item, key, initialValue, flowAccessor)
 }
 
 /**
- * Nullable variant of [rememberLazyItemState].
+ * Nullable variant of [List.rememberLazyItemState].
  *
- * Combines [LazyAccess] lifecycle management with flow collection,
- * returning null until the first flow emission.
- *
- * @param access The [LazyAccess] wrapper for the item
+ * @param index The index of the item in the list
  * @param key Key for recomposition identity
- * @param flowAccessor Function to extract the [Flow] from the acquired item
+ * @param flowAccessor Function to extract the [Flow] from the item
  * @return The current state value, or null before first emission
  */
 @Composable
-fun <T, S : Any> rememberLazyItemStateOrNull(
-    access: LazyAccess<T>,
+fun <T, S : Any> List<T>.rememberLazyItemStateOrNull(
+    index: Int,
     key: Any,
     flowAccessor: (T) -> Flow<S>
-): S? = rememberLazyItemState(access, key, null, flowAccessor)
+): S? = rememberLazyItemState(index, key, null, flowAccessor)

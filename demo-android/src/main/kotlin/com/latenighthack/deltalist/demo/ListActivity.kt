@@ -41,11 +41,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.latenighthack.deltalist.Change
-import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
-import com.latenighthack.deltalist.Mutation
 import com.latenighthack.deltalist.StableLazyAccess
+import com.latenighthack.deltalist.android.compose.collectAsDeltaState
+import com.latenighthack.deltalist.android.recyclerview.DeltaAdapter
 import com.latenighthack.deltalist.demo.ui.theme.DeltaListDemoTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
@@ -98,8 +97,8 @@ private fun ListScreen() {
 @Composable
 private fun ListComposeContent(viewModel: ListViewModel) {
     var selectedId by remember { mutableStateOf<String?>(null) }
-    val delta by viewModel.tickingItems.collectAsState(initial = Delta(emptyList(), Change.Reload))
-    val originalDelta by viewModel.items.collectAsState(initial = Delta(emptyList(), Change.Reload))
+    val delta = viewModel.tickingItems.collectAsDeltaState()
+    val originalDelta = viewModel.items.collectAsDeltaState()
     val selectedIndex = originalDelta.items.indexOfFirst { it.id == selectedId }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -273,14 +272,13 @@ private fun ListControlButtons(
     }
 }
 
-// RecyclerView Adapter
+// RecyclerView Adapter using DeltaAdapter
+// DeltaAdapter automatically handles stable IDs for StableLazyAccess<T> items
 private class TickingItemAdapter(
-    private val deltaList: DeltaList<StableLazyAccess<TickingItem>>,
+    deltaList: DeltaList<StableLazyAccess<TickingItem>>,
     private val onItemClick: (Int) -> Unit
-) : RecyclerView.Adapter<TickingItemAdapter.TickingItemViewHolder>() {
+) : DeltaAdapter<StableLazyAccess<TickingItem>, TickingItemAdapter.TickingItemViewHolder>(deltaList) {
 
-    private var items: List<StableLazyAccess<TickingItem>> = emptyList()
-    private var collectionJob: Job? = null
     private var lifecycleOwner: LifecycleOwner? = null
 
     var selectedIndex: Int = -1
@@ -291,44 +289,10 @@ private class TickingItemAdapter(
             if (value >= 0) notifyItemChanged(value)
         }
 
-    init {
-        setHasStableIds(true)
-    }
-
-    override fun getItemId(position: Int): Long {
-        return items[position].stableId.toLong()
-    }
-
-    fun bind(owner: LifecycleOwner) {
+    override fun bind(owner: LifecycleOwner) {
         lifecycleOwner = owner
-        collectionJob?.cancel()
-        collectionJob = owner.lifecycleScope.launch {
-            deltaList.collect { delta -> applyDelta(delta) }
-        }
+        super.bind(owner)
     }
-
-    private fun applyDelta(delta: Delta<StableLazyAccess<TickingItem>>) {
-        items = delta.items
-        when (val change = delta.change) {
-            is Change.Reload -> notifyDataSetChanged()
-            is Change.Mutations -> {
-                change.operations.forEach { mutation ->
-                    when (mutation) {
-                        is Mutation.Insert -> notifyItemRangeInserted(mutation.index, mutation.count)
-                        is Mutation.Remove -> notifyItemRangeRemoved(mutation.index, mutation.count)
-                        is Mutation.Update -> notifyItemRangeChanged(mutation.index, mutation.count)
-                        is Mutation.Move -> {
-                            repeat(mutation.count) { i ->
-                                notifyItemMoved(mutation.fromIndex + i, mutation.toIndex + i)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    override fun getItemCount(): Int = items.size
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): TickingItemViewHolder {
         val layout = LinearLayout(parent.context).apply {
@@ -350,7 +314,7 @@ private class TickingItemAdapter(
     }
 
     override fun onBindViewHolder(holder: TickingItemViewHolder, position: Int) {
-        val stableLazyAccess = items[position]
+        val stableLazyAccess = getItem(position)
         holder.bind(stableLazyAccess, position == selectedIndex, onItemClick, lifecycleOwner)
     }
 

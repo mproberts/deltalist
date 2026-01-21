@@ -49,13 +49,11 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.latenighthack.deltalist.Change
-import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DragState
 import com.latenighthack.deltalist.MoveableDeltaList
-import com.latenighthack.deltalist.Mutation
+import com.latenighthack.deltalist.android.compose.collectAsDeltaState
+import com.latenighthack.deltalist.android.recyclerview.DeltaAdapter
 import com.latenighthack.deltalist.demo.ui.theme.DeltaListDemoTheme
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
@@ -106,7 +104,7 @@ private fun DragDropScreen() {
 
 @Composable
 private fun DragDropComposeContent(viewModel: DragDropViewModel) {
-    val delta by viewModel.items.collectAsState(initial = Delta(emptyList(), Change.Reload))
+    val delta = viewModel.items.collectAsDeltaState()
     val dragState by viewModel.items.dragState.collectAsState()
     val scope = rememberCoroutineScope()
     val lazyListState = rememberLazyListState()
@@ -302,39 +300,10 @@ private fun DragDropControlButtons(
     }
 }
 
-// RecyclerView Adapter
+// RecyclerView Adapter using DeltaAdapter
 private class DragDropAdapter(
-    private val moveable: MoveableDeltaList<Item>
-) : RecyclerView.Adapter<DragDropAdapter.ViewHolder>() {
-
-    private var items: List<Item> = emptyList()
-    private var collectionJob: Job? = null
-
-    fun bind(owner: LifecycleOwner) {
-        collectionJob?.cancel()
-        collectionJob = owner.lifecycleScope.launch {
-            moveable.collect { delta -> applyDelta(delta) }
-        }
-    }
-
-    private fun applyDelta(delta: Delta<Item>) {
-        items = delta.items
-        when (val change = delta.change) {
-            is Change.Reload -> notifyDataSetChanged()
-            is Change.Mutations -> {
-                change.operations.forEach { mutation ->
-                    when (mutation) {
-                        is Mutation.Insert -> notifyItemRangeInserted(mutation.index, mutation.count)
-                        is Mutation.Remove -> notifyItemRangeRemoved(mutation.index, mutation.count)
-                        is Mutation.Update -> notifyItemRangeChanged(mutation.index, mutation.count)
-                        is Mutation.Move -> notifyItemMoved(mutation.fromIndex, mutation.toIndex)
-                    }
-                }
-            }
-        }
-    }
-
-    override fun getItemCount(): Int = items.size
+    moveable: MoveableDeltaList<Item>
+) : DeltaAdapter<Item, DragDropAdapter.ViewHolder>(moveable) {
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
         val layout = LinearLayout(parent.context).apply {
@@ -356,11 +325,9 @@ private class DragDropAdapter(
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        val item = items[position]
+        val item = getItem(position)
         holder.bind(item)
     }
-
-    fun getItem(position: Int): Item = items[position]
 
     class ViewHolder(
         view: View,

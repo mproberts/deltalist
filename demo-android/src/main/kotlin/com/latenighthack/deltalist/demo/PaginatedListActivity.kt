@@ -36,21 +36,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.latenighthack.deltalist.Change
-import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
-import com.latenighthack.deltalist.Mutation
-import com.latenighthack.deltalist.SoftList
 import com.latenighthack.deltalist.SoftValue
+import com.latenighthack.deltalist.android.compose.collectAsDeltaState
+import com.latenighthack.deltalist.android.recyclerview.DeltaAdapter
 import com.latenighthack.deltalist.demo.ui.theme.DeltaListDemoTheme
 import com.latenighthack.deltalist.softGetOrNull
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 
 private val FILTER_DIVISORS = listOf(2, 3, 5, 7, 11)
 
@@ -100,7 +94,7 @@ private fun PaginatedListScreen() {
 
 @Composable
 private fun PaginatedComposeContent(viewModel: PaginatedListViewModel) {
-    val delta by viewModel.paginatedNumbers.collectAsState(initial = Delta(emptyList(), Change.Reload))
+    val delta = viewModel.paginatedNumbers.collectAsDeltaState()
     val loadingDirection by viewModel.paginatedLoadingDirection.collectAsState()
     val loadedCount by viewModel.paginatedLoadedCount.collectAsState()
     val excludeDivisors by viewModel.excludeDivisors.collectAsState()
@@ -305,54 +299,19 @@ private fun LoadingItemCard(index: Int) {
     }
 }
 
-// RecyclerView Adapter for paginated numbers
+// RecyclerView Adapter using DeltaAdapter with SoftList support
+// Uses softGetItem() to determine view types for loaded vs loading states
 private class PaginatedNumberAdapter(
-    private val deltaList: DeltaList<Int>
-) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-
-    private var items: List<Int> = emptyList()
-    private var softItems: SoftList<Int>? = null
-    private var collectionJob: Job? = null
+    deltaList: DeltaList<Int>
+) : DeltaAdapter<Int, RecyclerView.ViewHolder>(deltaList) {
 
     companion object {
         private const val VIEW_TYPE_LOADED = 0
         private const val VIEW_TYPE_LOADING = 1
     }
 
-    fun bind(owner: LifecycleOwner) {
-        collectionJob?.cancel()
-        collectionJob = owner.lifecycleScope.launch {
-            deltaList.collect { delta -> applyDelta(delta) }
-        }
-    }
-
-    private fun applyDelta(delta: Delta<Int>) {
-        items = delta.items
-        softItems = delta.items as? SoftList<Int>
-        when (val change = delta.change) {
-            is Change.Reload -> notifyDataSetChanged()
-            is Change.Mutations -> {
-                change.operations.forEach { mutation ->
-                    when (mutation) {
-                        is Mutation.Insert -> notifyItemRangeInserted(mutation.index, mutation.count)
-                        is Mutation.Remove -> notifyItemRangeRemoved(mutation.index, mutation.count)
-                        is Mutation.Update -> notifyItemRangeChanged(mutation.index, mutation.count)
-                        is Mutation.Move -> {
-                            repeat(mutation.count) { i ->
-                                notifyItemMoved(mutation.fromIndex + i, mutation.toIndex + i)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    override fun getItemCount(): Int = items.size
-
     override fun getItemViewType(position: Int): Int {
-        val soft = softItems?.softGet(position)
-        return when (soft) {
+        return when (softGetItem(position)) {
             is SoftValue.Present -> VIEW_TYPE_LOADED
             is SoftValue.NotLoaded -> VIEW_TYPE_LOADING
             null -> VIEW_TYPE_LOADED
@@ -413,15 +372,16 @@ private class PaginatedNumberAdapter(
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         when (holder) {
             is NumberViewHolder -> {
-                val soft = softItems?.softGet(position)
-                if (soft is SoftValue.Present) {
-                    holder.bind(soft.value, position)
+                when (val soft = softGetItem(position)) {
+                    is SoftValue.Present -> holder.bind(soft.value, position)
+                    else -> {} // shouldn't happen if getItemViewType is correct
                 }
             }
             is LoadingViewHolder -> {
-                // Trigger fetch for unloaded items
+                // Trigger fetch for unloaded items by accessing via getItem()
+                // which will trigger the SoftList's fetch mechanism
                 try {
-                    items[position]
+                    getItem(position)
                 } catch (_: IndexOutOfBoundsException) {}
             }
         }

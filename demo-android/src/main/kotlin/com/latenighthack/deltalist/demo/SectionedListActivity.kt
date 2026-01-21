@@ -34,18 +34,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.latenighthack.deltalist.Change
-import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
-import com.latenighthack.deltalist.Mutation
+import com.latenighthack.deltalist.android.compose.collectAsDeltaState
+import com.latenighthack.deltalist.android.recyclerview.DeltaAdapter
 import com.latenighthack.deltalist.demo.ui.theme.DeltaListDemoTheme
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 
 class SectionedListActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -95,7 +90,7 @@ private fun SectionedListScreen() {
 private fun SectionedComposeContent(viewModel: SectionedListViewModel) {
     var selectedSectionIndex by remember { mutableIntStateOf(-1) }
     var selectedItemIndex by remember { mutableIntStateOf(-1) }
-    val delta by viewModel.flattenedSections.collectAsState(initial = Delta(emptyList(), Change.Reload))
+    val delta = viewModel.flattenedSections.collectAsDeltaState()
 
     Column(modifier = Modifier.fillMaxSize()) {
         LazyColumn(modifier = Modifier.weight(1f)) {
@@ -345,18 +340,15 @@ private fun SectionedControlButtons(
     }
 }
 
-// RecyclerView Adapter
+// RecyclerView Adapter using DeltaAdapter with multiple view types
+// Uses getItem() to inspect item types for getItemViewType
 private class SectionedAdapter(
-    private val deltaList: DeltaList<SectionRow>,
+    deltaList: DeltaList<SectionRow>,
     private val onSectionClick: (Int) -> Unit
-) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-
-    private var items: List<SectionRow> = emptyList()
-    private var collectionJob: Job? = null
+) : DeltaAdapter<SectionRow, RecyclerView.ViewHolder>(deltaList) {
 
     var selectedSectionIndex: Int = -1
         set(value) {
-            val old = field
             field = value
             items.forEachIndexed { index, row ->
                 if (row is SectionRow.Header) {
@@ -370,40 +362,10 @@ private class SectionedAdapter(
         private const val VIEW_TYPE_ITEM = 1
     }
 
-    fun bind(owner: LifecycleOwner) {
-        collectionJob?.cancel()
-        collectionJob = owner.lifecycleScope.launch {
-            deltaList.collect { delta -> applyDelta(delta) }
-        }
-    }
-
-    private fun applyDelta(delta: Delta<SectionRow>) {
-        items = delta.items
-        when (val change = delta.change) {
-            is Change.Reload -> notifyDataSetChanged()
-            is Change.Mutations -> {
-                change.operations.forEach { mutation ->
-                    when (mutation) {
-                        is Mutation.Insert -> notifyItemRangeInserted(mutation.index, mutation.count)
-                        is Mutation.Remove -> notifyItemRangeRemoved(mutation.index, mutation.count)
-                        is Mutation.Update -> notifyItemRangeChanged(mutation.index, mutation.count)
-                        is Mutation.Move -> {
-                            repeat(mutation.count) { i ->
-                                notifyItemMoved(mutation.fromIndex + i, mutation.toIndex + i)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    override fun getItemViewType(position: Int): Int = when (items[position]) {
+    override fun getItemViewType(position: Int): Int = when (getItem(position)) {
         is SectionRow.Header -> VIEW_TYPE_HEADER
         is SectionRow.ItemRow -> VIEW_TYPE_ITEM
     }
-
-    override fun getItemCount(): Int = items.size
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
@@ -441,7 +403,7 @@ private class SectionedAdapter(
     }
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
-        when (val row = items[position]) {
+        when (val row = getItem(position)) {
             is SectionRow.Header -> {
                 val sectionIndex = items.take(position + 1).count { it is SectionRow.Header } - 1
                 (holder as HeaderViewHolder).bind(row.header, sectionIndex == selectedSectionIndex) {

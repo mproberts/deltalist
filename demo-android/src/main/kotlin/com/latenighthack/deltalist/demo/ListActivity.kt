@@ -26,7 +26,6 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -36,19 +35,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.latenighthack.deltalist.DeltaList
 import com.latenighthack.deltalist.StableLazyAccess
 import com.latenighthack.deltalist.android.compose.collectAsDeltaState
-import com.latenighthack.deltalist.android.recyclerview.DeltaAdapter
+import com.latenighthack.deltalist.android.compose.rememberItemState
+import com.latenighthack.deltalist.android.recyclerview.FlowDeltaAdapter
 import com.latenighthack.deltalist.demo.ui.theme.DeltaListDemoTheme
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
 
 class ListActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -143,9 +138,8 @@ private fun LazyTickingItemCard(
     isSelected: (String) -> Boolean,
     onClick: (String) -> Unit
 ) {
-    val tickingItem = stableLazyAccess.getOrAcquire()
-    val itemId = tickingItem.item.id
     val stableId = stableLazyAccess.stableId
+    val tickingItem = remember(stableId) { stableLazyAccess.getOrAcquire() }
 
     DisposableEffect(stableId) {
         onDispose {
@@ -154,7 +148,14 @@ private fun LazyTickingItemCard(
         }
     }
 
-    val tickCount by tickingItem.tickCount.collectAsState()
+    // Use rememberItemState for automatic flow lifecycle management
+    val tickCount = rememberItemState(
+        item = tickingItem,
+        key = stableId,
+        initialValue = 0
+    ) { it.tickCount }
+
+    val itemId = tickingItem.item.id
     val isItemSelected = isSelected(itemId)
 
     Card(
@@ -272,14 +273,18 @@ private fun ListControlButtons(
     }
 }
 
-// RecyclerView Adapter using DeltaAdapter
-// DeltaAdapter automatically handles stable IDs for StableLazyAccess<T> items
+// RecyclerView Adapter using FlowDeltaAdapter
+// FlowDeltaAdapter automatically handles flow lifecycle (start on attach, stop on detach)
+// We use the lifecycle hooks to manage LazyAccess acquisition/release
 private class TickingItemAdapter(
     deltaList: DeltaList<StableLazyAccess<TickingItem>>,
     private val onItemClick: (Int) -> Unit
-) : DeltaAdapter<StableLazyAccess<TickingItem>, TickingItemAdapter.TickingItemViewHolder>(deltaList) {
-
-    private var lifecycleOwner: LifecycleOwner? = null
+) : FlowDeltaAdapter<StableLazyAccess<TickingItem>, Int, TickingItemAdapter.TickingItemViewHolder>(
+    deltaList,
+    flowAccessor = { stableLazyAccess -> stableLazyAccess.getOrAcquire().tickCount }
+) {
+    // Track acquired items to release them when flow stops
+    private val acquiredItems = mutableMapOf<TickingItemViewHolder, Pair<StableLazyAccess<TickingItem>, TickingItem>>()
 
     var selectedIndex: Int = -1
         set(value) {
@@ -288,11 +293,6 @@ private class TickingItemAdapter(
             if (oldIndex >= 0) notifyItemChanged(oldIndex)
             if (value >= 0) notifyItemChanged(value)
         }
-
-    override fun bind(owner: LifecycleOwner) {
-        lifecycleOwner = owner
-        super.bind(owner)
-    }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): TickingItemViewHolder {
         val layout = LinearLayout(parent.context).apply {
@@ -313,99 +313,47 @@ private class TickingItemAdapter(
         return TickingItemViewHolder(layout, titleView, tickView)
     }
 
-    override fun onBindViewHolder(holder: TickingItemViewHolder, position: Int) {
-        val stableLazyAccess = getItem(position)
-        holder.bind(stableLazyAccess, position == selectedIndex, onItemClick, lifecycleOwner)
+    // Called on bind - set up static content only
+    override fun onBindItem(holder: TickingItemViewHolder, position: Int, item: StableLazyAccess<TickingItem>) {
+        val tickingItem = item.getOrAcquire()
+        holder.titleView.text = tickingItem.item.title
+        holder.tickView.text = "Ticks: ${tickingItem.tickCount.value} | StableId: ${item.stableId}"
+        holder.stableId = item.stableId
+
+        val isSelected = position == selectedIndex
+        holder.itemView.isActivated = isSelected
+        holder.itemView.setBackgroundColor(if (isSelected) 0x330000FF else 0x00000000)
+        holder.itemView.setOnClickListener { onItemClick(holder.bindingAdapterPosition) }
     }
 
-    override fun onViewAttachedToWindow(holder: TickingItemViewHolder) {
-        super.onViewAttachedToWindow(holder)
-        holder.onAttached()
+    // Called when flow emits - update dynamic content
+    override fun onItemStateChanged(holder: TickingItemViewHolder, state: Int) {
+        holder.tickView.text = "Ticks: $state | StableId: ${holder.stableId}"
     }
 
-    override fun onViewDetachedFromWindow(holder: TickingItemViewHolder) {
-        super.onViewDetachedFromWindow(holder)
-        holder.onDetached()
+    // Called when flow starts (view attached) - track acquired item for later release
+    override fun onItemFlowStarted(holder: TickingItemViewHolder) {
+        val position = holder.bindingAdapterPosition
+        if (position != RecyclerView.NO_POSITION) {
+            val stableLazyAccess = getItem(position)
+            val tickingItem = stableLazyAccess.getOrAcquire()
+            acquiredItems[holder] = stableLazyAccess to tickingItem
+        }
     }
 
-    override fun onViewRecycled(holder: TickingItemViewHolder) {
-        super.onViewRecycled(holder)
-        holder.onRecycled()
+    // Called when flow stops (view detached/recycled) - release acquired item
+    override fun onItemFlowStopped(holder: TickingItemViewHolder) {
+        acquiredItems.remove(holder)?.let { (stableLazyAccess, tickingItem) ->
+            tickingItem.stop()
+            stableLazyAccess.release()
+        }
     }
 
     class TickingItemViewHolder(
         view: View,
-        private val titleView: TextView,
-        private val tickView: TextView
+        val titleView: TextView,
+        val tickView: TextView
     ) : RecyclerView.ViewHolder(view) {
-
-        private var currentStableLazyAccess: StableLazyAccess<TickingItem>? = null
-        private var currentTickingItem: TickingItem? = null
-        private var tickObserverJob: Job? = null
-        private var lifecycleOwner: LifecycleOwner? = null
-
-        fun bind(
-            stableLazyAccess: StableLazyAccess<TickingItem>,
-            isSelected: Boolean,
-            onClick: (Int) -> Unit,
-            owner: LifecycleOwner?
-        ) {
-            if (currentStableLazyAccess !== stableLazyAccess) {
-                releaseCurrentItem()
-            }
-
-            currentStableLazyAccess = stableLazyAccess
-            lifecycleOwner = owner
-
-            val tickingItem = stableLazyAccess.getOrAcquire()
-            currentTickingItem = tickingItem
-
-            val stableId = stableLazyAccess.stableId
-            titleView.text = tickingItem.item.title
-            tickView.text = "Ticks: ${tickingItem.tickCount.value} | StableId: $stableId"
-
-            itemView.isActivated = isSelected
-            itemView.setBackgroundColor(if (isSelected) 0x330000FF else 0x00000000)
-            itemView.setOnClickListener { onClick(bindingAdapterPosition) }
-
-            startObservingTicks(tickingItem, stableId, owner)
-        }
-
-        private fun startObservingTicks(tickingItem: TickingItem, stableId: Int, owner: LifecycleOwner?) {
-            tickObserverJob?.cancel()
-            tickObserverJob = owner?.lifecycleScope?.launch {
-                tickingItem.tickCount.collectLatest { count ->
-                    tickView.text = "Ticks: $count | StableId: $stableId"
-                }
-            }
-        }
-
-        fun onAttached() {
-            currentStableLazyAccess?.let { stableLazyAccess ->
-                if (currentTickingItem == null) {
-                    val tickingItem = stableLazyAccess.getOrAcquire()
-                    currentTickingItem = tickingItem
-                    titleView.text = tickingItem.item.title
-                    startObservingTicks(tickingItem, stableLazyAccess.stableId, lifecycleOwner)
-                }
-            }
-        }
-
-        fun onDetached() {
-            releaseCurrentItem()
-        }
-
-        fun onRecycled() {
-            releaseCurrentItem()
-        }
-
-        private fun releaseCurrentItem() {
-            tickObserverJob?.cancel()
-            tickObserverJob = null
-            currentTickingItem?.stop()
-            currentTickingItem = null
-            currentStableLazyAccess?.release()
-            currentStableLazyAccess = null
-        }
+        var stableId: Int = 0
     }
 }

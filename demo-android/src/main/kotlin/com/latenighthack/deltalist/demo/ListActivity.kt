@@ -275,7 +275,7 @@ private fun ListControlButtons(
 
 // RecyclerView Adapter
 private class TickingItemAdapter(
-    private val deltaFlow: DeltaList<StableLazyAccess<TickingItem>>,
+    private val deltaList: DeltaList<StableLazyAccess<TickingItem>>,
     private val onItemClick: (Int) -> Unit
 ) : RecyclerView.Adapter<TickingItemAdapter.TickingItemViewHolder>() {
 
@@ -303,7 +303,7 @@ private class TickingItemAdapter(
         lifecycleOwner = owner
         collectionJob?.cancel()
         collectionJob = owner.lifecycleScope.launch {
-            deltaFlow.collect { delta -> applyDelta(delta) }
+            deltaList.collect { delta -> applyDelta(delta) }
         }
     }
 

@@ -29,7 +29,7 @@ fun <T> Flow<List<T>>.asDeltaList(): DeltaList<T> = asDeltaList { it }
  * data class Contact(val contactId: String, val name: String, val phone: String)
  *
  * val contactsFlow: Flow<List<Contact>> = ...
- * val deltaFlow: DeltaList<Contact> = contactsFlow.asDeltaList { it.contactId }
+ * val deltaList: DeltaList<Contact> = contactsFlow.asDeltaList { it.contactId }
  * ```
  */
 fun <T, ID> Flow<List<T>>.asDeltaList(idSelector: (T) -> ID): DeltaList<T> = flow {

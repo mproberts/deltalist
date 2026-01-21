@@ -94,9 +94,6 @@ interface MoveableDeltaList<T> : DeltaList<T> {
     fun cancelDrag()
 }
 
-@Deprecated("Use MoveableDeltaList instead", ReplaceWith("MoveableDeltaList<T>"))
-typealias MoveableDeltaFlow<T> = MoveableDeltaList<T>
-
 /**
  * Wrap this [DeltaList] to enable drag-and-drop reordering.
  *

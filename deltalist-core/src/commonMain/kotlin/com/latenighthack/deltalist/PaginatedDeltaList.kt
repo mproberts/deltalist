@@ -40,14 +40,6 @@ fun <T, U> paginatedDeltaList(
     fetch: suspend (direction: LoadDirection, token: U) -> Page<T, U>
 ): DeltaList<T> = PaginatedDeltaListImpl(scope, fetchWindowSize, startToken, fetch)
 
-@Deprecated("Use paginatedDeltaList instead", ReplaceWith("paginatedDeltaList(scope, fetchWindowSize, startToken, fetch)"))
-fun <T, U> paginatedDeltaFlow(
-    scope: CoroutineScope,
-    fetchWindowSize: Int = 1,
-    startToken: U,
-    fetch: suspend (direction: LoadDirection, token: U) -> Page<T, U>
-): DeltaList<T> = paginatedDeltaList(scope, fetchWindowSize, startToken, fetch)
-
 internal class PaginatedDeltaListImpl<T, U>(
     private val scope: CoroutineScope,
     private val fetchWindowSize: Int,

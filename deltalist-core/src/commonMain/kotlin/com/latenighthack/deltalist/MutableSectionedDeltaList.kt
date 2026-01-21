@@ -29,9 +29,6 @@ interface MutableSectionedDeltaList<S, T> : Flow<SectionedDelta<S, T>> {
     fun reload(sections: List<Section<S, T>>)
 }
 
-@Deprecated("Use MutableSectionedDeltaList instead", ReplaceWith("MutableSectionedDeltaList<S, T>"))
-typealias MutableSectionedDeltaFlow<S, T> = MutableSectionedDeltaList<S, T>
-
 internal class MutableSectionedDeltaListImpl<S, T>(
     initial: List<Section<S, T>>
 ) : MutableSectionedDeltaList<S, T> {
@@ -152,8 +149,3 @@ internal class MutableSectionedDeltaListImpl<S, T>(
 fun <S, T> mutableSectionedDeltaListOf(
     initial: List<Section<S, T>> = emptyList()
 ): MutableSectionedDeltaList<S, T> = MutableSectionedDeltaListImpl(initial)
-
-@Deprecated("Use mutableSectionedDeltaListOf instead", ReplaceWith("mutableSectionedDeltaListOf(initial)"))
-fun <S, T> mutableSectionedDeltaFlowOf(
-    initial: List<Section<S, T>> = emptyList()
-): MutableSectionedDeltaList<S, T> = mutableSectionedDeltaListOf(initial)

@@ -21,9 +21,6 @@ interface MutableDeltaList<T> : Flow<Delta<T>> {
     fun clear()
 }
 
-@Deprecated("Use MutableDeltaList instead", ReplaceWith("MutableDeltaList<T>"))
-typealias MutableDeltaFlow<T> = MutableDeltaList<T>
-
 internal class MutableDeltaListImpl<T>(
     initial: List<T>
 ) : MutableDeltaList<T> {
@@ -86,7 +83,3 @@ internal class MutableDeltaListImpl<T>(
 
 fun <T> mutableDeltaListOf(initial: List<T> = emptyList()): MutableDeltaList<T> =
     MutableDeltaListImpl(initial)
-
-@Deprecated("Use mutableDeltaListOf instead", ReplaceWith("mutableDeltaListOf(initial)"))
-fun <T> mutableDeltaFlowOf(initial: List<T> = emptyList()): MutableDeltaList<T> =
-    mutableDeltaListOf(initial)

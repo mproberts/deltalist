@@ -14,12 +14,12 @@ import com.latenighthack.deltalist.DeltaList
 
 @Composable
 fun <T> DeltaLazyColumn(
-    deltaFlow: DeltaList<T>,
+    deltaList: DeltaList<T>,
     modifier: Modifier = Modifier,
     key: ((T) -> Any)? = null,
     content: @Composable LazyItemScope.(T) -> Unit
 ) {
-    val delta by deltaFlow.collectAsState(initial = Delta(emptyList(), Change.Reload))
+    val delta by deltaList.collectAsState(initial = Delta(emptyList(), Change.Reload))
 
     LazyColumn(modifier = modifier) {
         items(
@@ -33,13 +33,13 @@ fun <T> DeltaLazyColumn(
 
 @Composable
 fun <T> DeltaLazyColumn(
-    deltaFlow: DeltaList<T>,
+    deltaList: DeltaList<T>,
     modifier: Modifier = Modifier,
     key: ((T) -> Any)? = null,
     contentType: (T) -> Any? = { null },
     content: @Composable LazyItemScope.(T) -> Unit
 ) {
-    val delta by deltaFlow.collectAsState(initial = Delta(emptyList(), Change.Reload))
+    val delta by deltaList.collectAsState(initial = Delta(emptyList(), Change.Reload))
 
     LazyColumn(modifier = modifier) {
         items(

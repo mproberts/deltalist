@@ -8,6 +8,3 @@ import kotlinx.coroutines.flow.Flow
  * (UICollectionView, UITableView).
  */
 typealias SectionedDeltaList<S, T> = Flow<SectionedDelta<S, T>>
-
-@Deprecated("Use SectionedDeltaList instead", ReplaceWith("SectionedDeltaList<S, T>"))
-typealias SectionedDeltaFlow<S, T> = SectionedDeltaList<S, T>

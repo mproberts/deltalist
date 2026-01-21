@@ -8,7 +8,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-class DeltaFlowBuilderTest {
+class DeltaListBuilderTest {
 
     data class Item(val id: String, val name: String)
 

@@ -307,7 +307,7 @@ private fun LoadingItemCard(index: Int) {
 
 // RecyclerView Adapter for paginated numbers
 private class PaginatedNumberAdapter(
-    private val deltaFlow: DeltaList<Int>
+    private val deltaList: DeltaList<Int>
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     private var items: List<Int> = emptyList()
@@ -322,7 +322,7 @@ private class PaginatedNumberAdapter(
     fun bind(owner: LifecycleOwner) {
         collectionJob?.cancel()
         collectionJob = owner.lifecycleScope.launch {
-            deltaFlow.collect { delta -> applyDelta(delta) }
+            deltaList.collect { delta -> applyDelta(delta) }
         }
     }
 

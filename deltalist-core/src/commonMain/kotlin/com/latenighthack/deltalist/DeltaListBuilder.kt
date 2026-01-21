@@ -97,9 +97,6 @@ interface ListMutatingDeltaList<T> : List<T> {
     suspend fun reload(elements: List<T>)
 }
 
-@Deprecated("Use ListMutatingDeltaList instead", ReplaceWith("ListMutatingDeltaList<T>"))
-typealias FlowMutatingDeltaList<T> = ListMutatingDeltaList<T>
-
 /**
  * Creates a [DeltaList] using a builder pattern similar to [flow].
  *
@@ -138,12 +135,6 @@ fun <T> deltaList(
     // Run the builder block
     block(list)
 }
-
-@Deprecated("Use deltaList instead", ReplaceWith("deltaList(initial, block)"))
-fun <T> deltaFlow(
-    initial: List<T> = emptyList(),
-    block: suspend (ListMutatingDeltaList<T>) -> Unit
-): DeltaList<T> = deltaList(initial, block)
 
 /**
  * Implementation of [MutatingDeltaList] that tracks mutations.

@@ -11,7 +11,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
-    private val deltaFlow: DeltaList<T>
+    private val deltaList: DeltaList<T>
 ) : RecyclerView.Adapter<VH>() {
 
     private var items: List<T> = emptyList()
@@ -20,7 +20,7 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
     fun bind(owner: LifecycleOwner) {
         job?.cancel()
         job = owner.lifecycleScope.launch {
-            deltaFlow.collect { delta -> applyDelta(delta) }
+            deltaList.collect { delta -> applyDelta(delta) }
         }
     }
 

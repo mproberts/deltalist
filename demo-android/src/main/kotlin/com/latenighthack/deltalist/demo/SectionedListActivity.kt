@@ -347,7 +347,7 @@ private fun SectionedControlButtons(
 
 // RecyclerView Adapter
 private class SectionedAdapter(
-    private val deltaFlow: DeltaList<SectionRow>,
+    private val deltaList: DeltaList<SectionRow>,
     private val onSectionClick: (Int) -> Unit
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
@@ -373,7 +373,7 @@ private class SectionedAdapter(
     fun bind(owner: LifecycleOwner) {
         collectionJob?.cancel()
         collectionJob = owner.lifecycleScope.launch {
-            deltaFlow.collect { delta -> applyDelta(delta) }
+            deltaList.collect { delta -> applyDelta(delta) }
         }
     }
 

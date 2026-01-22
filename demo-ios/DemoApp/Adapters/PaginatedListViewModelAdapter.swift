@@ -8,9 +8,13 @@ class PaginatedListViewModelAdapter: ObservableObject {
     private let viewModel = PaginatedListViewModel()
 
     @Published private(set) var numbers: [Int] = []
+    @Published private(set) var totalSize: Int = 0
     @Published private(set) var loadingDirection: LoadDirection? = nil
     @Published private(set) var loadedCount: Int = 0
     @Published private(set) var excludeDivisors: Set<Int> = []
+
+    // Store the current delta to allow requesting more items
+    private var currentDelta: Delta<KotlinInt>?
 
     private var numbersTask: Task<Void, Never>?
     private var loadingDirectionTask: Task<Void, Never>?
@@ -28,10 +32,13 @@ class PaginatedListViewModelAdapter: ObservableObject {
 
             let collector = IntDeltaFlowCollector { [weak self] delta in
                 guard let self = self else { return }
+                // Store delta so we can request more items later
+                self.currentDelta = delta
                 // Use delta.loadedItems() to safely get only loaded items without triggering bridging
                 // IMPORTANT: Never access delta.items directly from Swift - it triggers bridging
                 let loadedItems = delta.loadedItems()
                 self.numbers = loadedItems.compactMap { ($0 as? NSNumber)?.intValue }
+                self.totalSize = Int(delta.totalSize())
             }
 
             do {
@@ -101,6 +108,27 @@ class PaginatedListViewModelAdapter: ObservableObject {
 
     func toggleDivisorFilter(_ divisor: Int) {
         viewModel.toggleDivisorFilter(divisor: Int32(divisor))
+    }
+
+    /// Check if an item at the given index is loaded.
+    func isLoadedAt(index: Int) -> Bool {
+        currentDelta?.isLoadedAt(index: Int32(index)) ?? false
+    }
+
+    /// Get the loaded value at the given index, or nil if not loaded.
+    func getLoadedItemAt(index: Int) -> Int? {
+        guard let value = currentDelta?.getLoadedItemAt(index: Int32(index)) else { return nil }
+        return (value as? NSNumber)?.intValue
+    }
+
+    /// Trigger loading at the given index. Call this when displaying a loading placeholder.
+    func triggerLoadAt(index: Int) {
+        currentDelta?.triggerLoadAt(index: Int32(index))
+    }
+
+    /// Returns true if there are more items to load beyond the current loaded items.
+    var hasMoreItems: Bool {
+        totalSize > numbers.count
     }
 
     deinit {

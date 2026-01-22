@@ -37,15 +37,19 @@ private struct PaginatedSwiftUIContent: View {
             // Status bar
             PaginatedStatusBar(viewModel: viewModel)
 
-            // List
+            // List - show totalSize items, with placeholders for unloaded ones
             List {
-                ForEach(Array(viewModel.numbers.enumerated()), id: \.offset) { index, number in
-                    NumberItemRow(number: number, index: index)
-                }
-
-                // Load more trigger - pagination is handled by the Kotlin ViewModel
-                if viewModel.loadedCount < 10_000 {
-                    LoadingRow()
+                ForEach(0..<viewModel.totalSize, id: \.self) { index in
+                    if let number = viewModel.getLoadedItemAt(index: index) {
+                        // Item is loaded - show the value
+                        NumberItemRow(number: number, index: index)
+                    } else {
+                        // Item not loaded - show placeholder and trigger fetch
+                        LoadingRow()
+                            .onAppear {
+                                viewModel.triggerLoadAt(index: index)
+                            }
+                    }
                 }
             }
             .listStyle(.plain)
@@ -67,7 +71,7 @@ private struct PaginatedStatusBar: View {
                 Text("Paginated List (10,000 items)")
                     .font(.headline)
 
-                Text("Loaded: \(viewModel.loadedCount) / Filtered: \(viewModel.numbers.count) / Total: 10,000")
+                Text("Loaded: \(viewModel.loadedCount) / Filtered: \(viewModel.numbers.count) / Total: \(viewModel.totalSize)")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

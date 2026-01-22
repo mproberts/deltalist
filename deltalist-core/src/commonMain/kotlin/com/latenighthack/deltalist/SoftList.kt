@@ -188,3 +188,59 @@ fun <T> Delta<T>.loadedCount(): Int = items.softLoadedCount()
  * This is safe to call from iOS - pass the Delta directly to avoid bridging issues.
  */
 fun <T, R> Delta<T>.mapLoaded(transform: (T) -> R): List<R> = items.softMapLoaded(transform)
+
+/**
+ * Returns the total size of items in a Delta (including estimated unloaded items for paginated lists).
+ * This is safe to call from iOS - pass the Delta directly to avoid bridging issues.
+ */
+fun <T> Delta<T>.totalSize(): Int = items.size
+
+/**
+ * Requests loading of more items if there are unloaded items available.
+ * Call this when the UI scrolls near the end of the loaded items to trigger pagination.
+ * This is safe to call from iOS - pass the Delta directly to avoid bridging issues.
+ *
+ * @param index The index to request loading for (typically loadedCount or near the end of visible items)
+ */
+fun <T> Delta<T>.requestLoadAt(index: Int) {
+    val softValue = items.softGetOrNull(index)
+    if (softValue is SoftValue.NotLoaded) {
+        softValue.request()
+    }
+}
+
+/**
+ * Checks if an item at the given index is loaded.
+ * Returns true if the item is present, false if not loaded or out of bounds.
+ * This is safe to call from iOS - pass the Delta directly to avoid bridging issues.
+ */
+fun <T> Delta<T>.isLoadedAt(index: Int): Boolean {
+    return items.softGetOrNull(index) is SoftValue.Present
+}
+
+/**
+ * Gets an item at the given index if it's loaded, or null if not loaded/out of bounds.
+ * This is safe to call from iOS - pass the Delta directly to avoid bridging issues.
+ */
+fun <T> Delta<T>.getLoadedItemAt(index: Int): T? {
+    return (items.softGetOrNull(index) as? SoftValue.Present)?.value
+}
+
+/**
+ * Triggers a fetch for an item at the given index.
+ * This should be called when displaying a loading placeholder to trigger pagination.
+ * This is safe to call from iOS - pass the Delta directly to avoid bridging issues.
+ */
+fun <T> Delta<T>.triggerLoadAt(index: Int) {
+    // First try the soft request
+    val softValue = items.softGetOrNull(index)
+    if (softValue is SoftValue.NotLoaded) {
+        softValue.request()
+    }
+    // Also try hard access to trigger fetch (like Android does)
+    try {
+        items[index]
+    } catch (_: IndexOutOfBoundsException) {
+        // Expected for unloaded items
+    }
+}

@@ -156,8 +156,12 @@ class DragDropViewModelAdapter: ObservableObject {
         }
 
         // Use the moveable API
+        // SwiftUI's destination is the index after the source is removed
+        // When moving down, we need to adjust by -1 for the Kotlin API
+        let adjustedDestination = fromIndex < destination ? destination - 1 : destination
+
         if viewModel.items.beginDrag(index: Int32(fromIndex)) {
-            viewModel.items.updateDragPreview(toIndex: Int32(destination))
+            viewModel.items.updateDragPreview(toIndex: Int32(adjustedDestination))
             Task {
                 _ = await commitDrag()
             }

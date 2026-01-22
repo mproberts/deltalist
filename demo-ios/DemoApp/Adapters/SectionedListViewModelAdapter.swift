@@ -20,21 +20,6 @@ struct SectionHeaderWrapper: Identifiable, Hashable {
     }
 }
 
-/// Row type for flattened sectioned lists.
-enum SectionRowWrapper: Identifiable, Hashable {
-    case header(SectionHeaderWrapper)
-    case itemRow(ItemWrapper, sectionIndex: Int)
-
-    var id: String {
-        switch self {
-        case .header(let header):
-            return "header-\(header.id)"
-        case .itemRow(let item, _):
-            return "item-\(item.id)"
-        }
-    }
-}
-
 /// Section wrapper containing a header and items.
 struct ItemSectionWrapper: Identifiable {
     let id: String
@@ -61,40 +46,15 @@ class SectionedListViewModelAdapter: ObservableObject {
     private let viewModel = SectionedListViewModel()
 
     @Published private(set) var sections: [ItemSectionWrapper] = []
-    @Published private(set) var flattenedRows: [SectionRowWrapper] = []
 
     private var sectionsTask: Task<Void, Never>?
-    private var flattenedTask: Task<Void, Never>?
 
     init() {
         startCollecting()
     }
 
     private func startCollecting() {
-        // Collect flattened sections
-        flattenedTask = Task { @MainActor [weak self] in
-            guard let self = self else { return }
-
-            let collector = SectionRowDeltaFlowCollector { [weak self] delta in
-                guard let self = self else { return }
-                self.flattenedRows = delta.items.compactMap { item -> SectionRowWrapper? in
-                    if let header = item as? SectionRow.Header {
-                        return .header(SectionHeaderWrapper(kotlinHeader: header.header))
-                    } else if let itemRow = item as? SectionRow.ItemRow {
-                        return .itemRow(ItemWrapper(kotlinItem: itemRow.item), sectionIndex: 0)
-                    }
-                    return nil
-                }
-            }
-
-            do {
-                try await self.viewModel.flattenedSections.collect(collector: collector)
-            } catch {
-                // Collection ended
-            }
-        }
-
-        // Also collect raw sections for section-level operations
+        // Collect sections
         sectionsTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
 
@@ -115,7 +75,6 @@ class SectionedListViewModelAdapter: ObservableObject {
 
     func stopCollecting() {
         sectionsTask?.cancel()
-        flattenedTask?.cancel()
     }
 
     // MARK: - Actions
@@ -146,31 +105,10 @@ class SectionedListViewModelAdapter: ObservableObject {
 
     deinit {
         sectionsTask?.cancel()
-        flattenedTask?.cancel()
     }
 }
 
 // MARK: - Flow Collectors
-
-/// FlowCollector for DeltaList<SectionRow> flows.
-class SectionRowDeltaFlowCollector: Kotlinx_coroutines_coreFlowCollector {
-    private let onDelta: (Delta<SectionRow>) -> Void
-
-    init(onDelta: @escaping (Delta<SectionRow>) -> Void) {
-        self.onDelta = onDelta
-    }
-
-    func emit(value: Any?, completionHandler: @escaping (Error?) -> Void) {
-        if let delta = value as? Delta<SectionRow> {
-            Task { @MainActor [self] in
-                self.onDelta(delta)
-                completionHandler(nil)
-            }
-        } else {
-            completionHandler(nil)
-        }
-    }
-}
 
 /// FlowCollector for SectionedDeltaList flows.
 class SectionedDeltaFlowCollector: Kotlinx_coroutines_coreFlowCollector {

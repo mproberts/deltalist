@@ -1,18 +1,18 @@
 import UIKit
 import Combine
 
-/// UIKit implementation of the sectioned list demo.
+/// UIKit implementation of the sectioned list demo using native UICollectionView sections.
 @MainActor
 class SectionedListViewController: UIViewController {
     private let viewModel: SectionedListViewModelAdapter
     private var collectionView: UICollectionView!
-    private var dataSource: UICollectionViewDiffableDataSource<Int, SectionRowWrapper>!
+    private var dataSource: UICollectionViewDiffableDataSource<String, String>!
     private var cancellables = Set<AnyCancellable>()
 
     var selectedSectionIndex: Int = -1 {
         didSet {
             if oldValue != selectedSectionIndex {
-                collectionView.reloadData()
+                updateSnapshot()
             }
         }
     }
@@ -46,57 +46,63 @@ class SectionedListViewController: UIViewController {
 
     private func createLayout() -> UICollectionViewLayout {
         var config = UICollectionLayoutListConfiguration(appearance: .plain)
-        config.showsSeparators = false
+        config.showsSeparators = true
+        config.headerMode = .supplementary
         return UICollectionViewCompositionalLayout.list(using: config)
     }
 
     private func setupDataSource() {
-        let headerRegistration = UICollectionView.CellRegistration<SectionHeaderCell, SectionHeaderWrapper> { [weak self] cell, indexPath, header in
-            let sectionIndex = self?.sectionIndex(for: indexPath) ?? 0
-            cell.configure(with: header, isSelected: sectionIndex == self?.selectedSectionIndex)
-        }
-
-        let itemRegistration = UICollectionView.CellRegistration<SectionItemCell, ItemWrapper> { cell, indexPath, item in
-            cell.configure(with: item)
-        }
-
-        dataSource = UICollectionViewDiffableDataSource<Int, SectionRowWrapper>(collectionView: collectionView) { collectionView, indexPath, row in
-            switch row {
-            case .header(let header):
-                return collectionView.dequeueConfiguredReusableCell(using: headerRegistration, for: indexPath, item: header)
-            case .itemRow(let item, _):
-                return collectionView.dequeueConfiguredReusableCell(using: itemRegistration, for: indexPath, item: item)
+        // Item cell registration
+        let itemRegistration = UICollectionView.CellRegistration<SectionItemCell, String> { [weak self] cell, indexPath, itemId in
+            guard let self = self,
+                  indexPath.section < self.viewModel.sections.count else { return }
+            let section = self.viewModel.sections[indexPath.section]
+            if let item = section.items.first(where: { $0.id == itemId }) {
+                cell.configure(with: item)
             }
+        }
+
+        dataSource = UICollectionViewDiffableDataSource<String, String>(collectionView: collectionView) { collectionView, indexPath, itemId in
+            collectionView.dequeueConfiguredReusableCell(using: itemRegistration, for: indexPath, item: itemId)
+        }
+
+        // Section header registration
+        let headerRegistration = UICollectionView.SupplementaryRegistration<SectionHeaderView>(
+            elementKind: UICollectionView.elementKindSectionHeader
+        ) { [weak self] headerView, elementKind, indexPath in
+            guard let self = self,
+                  indexPath.section < self.viewModel.sections.count else { return }
+            let section = self.viewModel.sections[indexPath.section]
+            let isSelected = indexPath.section == self.selectedSectionIndex
+            headerView.configure(with: section.header, isSelected: isSelected)
+            headerView.setTapHandler { [weak self] in
+                self?.onSectionSelected?(indexPath.section)
+            }
+        }
+
+        dataSource.supplementaryViewProvider = { collectionView, kind, indexPath in
+            collectionView.dequeueConfiguredReusableSupplementary(using: headerRegistration, for: indexPath)
         }
     }
 
     private func bindViewModel() {
-        viewModel.$flattenedRows
+        viewModel.$sections
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] rows in
-                self?.updateSnapshot(rows: rows)
+            .sink { [weak self] _ in
+                self?.updateSnapshot()
             }
             .store(in: &cancellables)
     }
 
-    private func updateSnapshot(rows: [SectionRowWrapper]) {
-        var snapshot = NSDiffableDataSourceSnapshot<Int, SectionRowWrapper>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(rows, toSection: 0)
-        dataSource.apply(snapshot, animatingDifferences: true)
-    }
+    private func updateSnapshot() {
+        var snapshot = NSDiffableDataSourceSnapshot<String, String>()
 
-    private func sectionIndex(for indexPath: IndexPath) -> Int {
-        let rows = viewModel.flattenedRows
-        guard indexPath.item < rows.count else { return -1 }
-
-        var sectionCount = -1
-        for i in 0...indexPath.item {
-            if case .header = rows[i] {
-                sectionCount += 1
-            }
+        for section in viewModel.sections {
+            snapshot.appendSections([section.id])
+            snapshot.appendItems(section.items.map { $0.id }, toSection: section.id)
         }
-        return sectionCount
+
+        dataSource.apply(snapshot, animatingDifferences: true)
     }
 }
 
@@ -105,21 +111,15 @@ class SectionedListViewController: UIViewController {
 extension SectionedListViewController: UICollectionViewDelegate {
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: true)
-
-        guard indexPath.item < viewModel.flattenedRows.count else { return }
-        let row = viewModel.flattenedRows[indexPath.item]
-
-        if case .header = row {
-            let sectionIndex = self.sectionIndex(for: indexPath)
-            onSectionSelected?(sectionIndex)
-        }
+        // Item selection - could be extended if needed
     }
 }
 
-// MARK: - Section Header Cell
+// MARK: - Section Header View
 
-private class SectionHeaderCell: UICollectionViewListCell {
+private class SectionHeaderView: UICollectionReusableView {
     private var titleLabel: UILabel!
+    private var tapHandler: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -136,18 +136,29 @@ private class SectionHeaderCell: UICollectionViewListCell {
         titleLabel.textColor = .white
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        contentView.addSubview(titleLabel)
+        addSubview(titleLabel)
         NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            titleLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12)
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            titleLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
         ])
+
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        addGestureRecognizer(tapGesture)
     }
 
     func configure(with header: SectionHeaderWrapper, isSelected: Bool) {
         titleLabel.text = header.title
-        contentView.backgroundColor = UIColor(header.color).withAlphaComponent(isSelected ? 1.0 : 0.8)
+        backgroundColor = UIColor(header.color).withAlphaComponent(isSelected ? 1.0 : 0.8)
+    }
+
+    func setTapHandler(_ handler: @escaping () -> Void) {
+        self.tapHandler = handler
+    }
+
+    @objc private func handleTap() {
+        tapHandler?()
     }
 }
 
@@ -184,10 +195,10 @@ private class SectionItemCell: UICollectionViewListCell {
 
         contentView.addSubview(stackView)
         NSLayoutConstraint.activate([
-            stackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 32),
-            stackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            stackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            stackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8)
+            stackView.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
+            stackView.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
+            stackView.topAnchor.constraint(equalTo: contentView.layoutMarginsGuide.topAnchor),
+            stackView.bottomAnchor.constraint(equalTo: contentView.layoutMarginsGuide.bottomAnchor)
         ])
     }
 

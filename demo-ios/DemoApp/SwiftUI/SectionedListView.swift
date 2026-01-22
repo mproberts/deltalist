@@ -43,35 +43,32 @@ private struct SectionedSwiftUIContent: View {
     var body: some View {
         VStack(spacing: 0) {
             List {
-                ForEach(viewModel.flattenedRows) { row in
-                    switch row {
-                    case .header(let header):
+                ForEach(Array(viewModel.sections.enumerated()), id: \.element.id) { sectionIndex, section in
+                    Section {
+                        ForEach(Array(section.items.enumerated()), id: \.element.id) { itemIndex, item in
+                            SectionItemRow(
+                                item: item,
+                                isSelected: selectedSectionIndex == sectionIndex && selectedItemIndex == itemIndex,
+                                onTap: {
+                                    if selectedSectionIndex == sectionIndex && selectedItemIndex == itemIndex {
+                                        selectedItemIndex = nil
+                                    } else {
+                                        selectedSectionIndex = sectionIndex
+                                        selectedItemIndex = itemIndex
+                                    }
+                                }
+                            )
+                        }
+                    } header: {
                         SectionHeaderRow(
-                            header: header,
-                            isSelected: selectedSectionIndex == sectionIndex(for: row),
+                            header: section.header,
+                            isSelected: selectedSectionIndex == sectionIndex,
                             onTap: {
-                                let index = sectionIndex(for: row)
-                                if selectedSectionIndex == index {
+                                if selectedSectionIndex == sectionIndex {
                                     selectedSectionIndex = nil
                                 } else {
-                                    selectedSectionIndex = index
-                                    selectedItemIndex = nil
-                                }
-                            }
-                        )
-                        .listRowInsets(EdgeInsets())
-
-                    case .itemRow(let item, let sectionIndex):
-                        SectionItemRow(
-                            item: item,
-                            isSelected: selectedSectionIndex == sectionIndex && selectedItemIndex == itemIndex(for: row),
-                            onTap: {
-                                let itemIdx = itemIndex(for: row)
-                                if selectedSectionIndex == sectionIndex && selectedItemIndex == itemIdx {
-                                    selectedItemIndex = nil
-                                } else {
                                     selectedSectionIndex = sectionIndex
-                                    selectedItemIndex = itemIdx
+                                    selectedItemIndex = nil
                                 }
                             }
                         )
@@ -88,42 +85,6 @@ private struct SectionedSwiftUIContent: View {
             )
         }
     }
-
-    private func sectionIndex(for row: SectionRowWrapper) -> Int? {
-        var sectionCount = 0
-        for r in viewModel.flattenedRows {
-            if case .header = r {
-                if r.id == row.id {
-                    return sectionCount
-                }
-                sectionCount += 1
-            }
-        }
-        return nil
-    }
-
-    private func itemIndex(for row: SectionRowWrapper) -> Int? {
-        guard case .itemRow(_, let sectionIndex) = row else { return nil }
-
-        var currentSection = -1
-        var itemCount = 0
-
-        for r in viewModel.flattenedRows {
-            switch r {
-            case .header:
-                currentSection += 1
-                itemCount = 0
-            case .itemRow:
-                if currentSection == sectionIndex {
-                    if r.id == row.id {
-                        return itemCount
-                    }
-                    itemCount += 1
-                }
-            }
-        }
-        return nil
-    }
 }
 
 // MARK: - Section Header Row
@@ -138,8 +99,11 @@ private struct SectionHeaderRow: View {
             .font(.headline)
             .foregroundColor(.white)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
+            .padding(.vertical, 12)
+            .padding(.horizontal, 16)
             .background(header.color.opacity(isSelected ? 1.0 : 0.8))
+            .textCase(nil) // Prevent automatic uppercasing of section headers
+            .listRowInsets(EdgeInsets())
             .contentShape(Rectangle())
             .onTapGesture(perform: onTap)
     }

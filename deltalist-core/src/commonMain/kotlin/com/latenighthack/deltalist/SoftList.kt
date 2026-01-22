@@ -69,3 +69,122 @@ fun <T> List<T>.softGetOrNull(index: Int): SoftValue<T>? {
         else SoftValue.Present(get(index))
     }
 }
+
+/**
+ * Gets the size of a list safely.
+ * This is useful for iOS where accessing .count on a bridged list can trigger iteration.
+ */
+fun <T> List<T>.softSize(): Int = size
+
+/**
+ * Gets the number of actually loaded items in a list.
+ * For regular lists, this equals the size.
+ * For [SoftList] implementations, this returns the count of items that are [SoftValue.Present].
+ */
+fun <T> List<T>.softLoadedCount(): Int {
+    if (this !is SoftList<T>) return size
+
+    var count = 0
+    for (i in indices) {
+        when (softGet(i)) {
+            is SoftValue.Present -> count++
+            is SoftValue.NotLoaded -> break // Loaded items are contiguous at the start
+            null -> break
+        }
+    }
+    return count
+}
+
+/**
+ * Maps over only the loaded items in a list, returning a new list.
+ * For regular lists, this maps over all items.
+ * For [SoftList] implementations, this only maps over items that are [SoftValue.Present].
+ *
+ * This is safe to call from iOS without triggering bridging issues.
+ */
+fun <T, R> List<T>.softMapLoaded(transform: (T) -> R): List<R> {
+    val result = mutableListOf<R>()
+
+    if (this is SoftList<T>) {
+        for (i in indices) {
+            when (val soft = softGet(i)) {
+                is SoftValue.Present -> result.add(transform(soft.value))
+                is SoftValue.NotLoaded -> break // Stop at first unloaded
+                null -> break
+            }
+        }
+    } else {
+        for (item in this) {
+            result.add(transform(item))
+        }
+    }
+
+    return result
+}
+
+/**
+ * Iterates over only the loaded items in a list.
+ * For regular lists, this iterates over all items.
+ * For [SoftList] implementations, this only iterates over items that are [SoftValue.Present].
+ *
+ * This is safe to call from iOS without triggering bridging issues.
+ */
+inline fun <T> List<T>.softForEachLoaded(action: (T) -> Unit) {
+    if (this is SoftList<T>) {
+        for (i in indices) {
+            when (val soft = softGet(i)) {
+                is SoftValue.Present -> action(soft.value)
+                is SoftValue.NotLoaded -> break
+                null -> break
+            }
+        }
+    } else {
+        for (item in this) {
+            action(item)
+        }
+    }
+}
+
+/**
+ * Returns a list containing only the loaded items.
+ * For regular lists, returns a copy of the list.
+ * For [SoftList] implementations, returns only items that are [SoftValue.Present].
+ *
+ * This is safe to call from iOS without triggering bridging issues.
+ */
+fun <T> List<T>.softLoadedItems(): List<T> {
+    if (this !is SoftList<T>) return this.toList()
+
+    val result = mutableListOf<T>()
+    for (i in indices) {
+        when (val soft = softGet(i)) {
+            is SoftValue.Present -> result.add(soft.value)
+            is SoftValue.NotLoaded -> break
+            null -> break
+        }
+    }
+    return result
+}
+
+// ============================================================================
+// Delta helpers - these take Delta directly to avoid iOS bridging issues
+// when accessing delta.items from Swift
+// ============================================================================
+
+/**
+ * Returns a list containing only the loaded items from a Delta.
+ * This is safe to call from iOS - pass the Delta directly to avoid bridging issues.
+ */
+fun <T> Delta<T>.loadedItems(): List<T> = items.softLoadedItems()
+
+/**
+ * Returns the count of loaded items in a Delta.
+ * This is safe to call from iOS - pass the Delta directly to avoid bridging issues.
+ */
+fun <T> Delta<T>.loadedCount(): Int = items.softLoadedCount()
+
+/**
+ * Maps over only the loaded items in a Delta.
+ * This is safe to call from iOS - pass the Delta directly to avoid bridging issues.
+ */
+fun <T, R> Delta<T>.mapLoaded(transform: (T) -> R): List<R> = items.softMapLoaded(transform)

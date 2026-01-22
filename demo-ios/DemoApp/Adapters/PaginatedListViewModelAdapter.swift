@@ -28,7 +28,10 @@ class PaginatedListViewModelAdapter: ObservableObject {
 
             let collector = IntDeltaFlowCollector { [weak self] delta in
                 guard let self = self else { return }
-                self.numbers = delta.items.compactMap { ($0 as? NSNumber)?.intValue }
+                // Use delta.loadedItems() to safely get only loaded items without triggering bridging
+                // IMPORTANT: Never access delta.items directly from Swift - it triggers bridging
+                let loadedItems = delta.loadedItems()
+                self.numbers = loadedItems.compactMap { ($0 as? NSNumber)?.intValue }
             }
 
             do {

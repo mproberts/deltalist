@@ -6,7 +6,7 @@ import DemoCore
 /// Uses SKIE's automatic Flow→AsyncSequence conversion where available.
 @MainActor
 class DragDropViewModelAdapter: ObservableObject {
-    private let viewModel = DragDropViewModel()
+    let viewModel = DragDropViewModel()
 
     @Published private(set) var items: [ItemWrapper] = []
     @Published private(set) var dragState: DragStateWrapper = .idle

@@ -179,11 +179,12 @@ private struct PaginatedListViewControllerRepresentable: UIViewControllerReprese
     let viewModel: PaginatedListViewModelAdapter
 
     func makeUIViewController(context: Context) -> PaginatedListViewController {
-        PaginatedListViewController(viewModel: viewModel)
+        // Pass the Kotlin ViewModel directly to the UIKit controller
+        PaginatedListViewController(viewModel: viewModel.viewModel)
     }
 
     func updateUIViewController(_ uiViewController: PaginatedListViewController, context: Context) {
-        // Updates handled by Combine bindings in the view controller
+        // Updates handled by flow collection in the view controller
     }
 }
 

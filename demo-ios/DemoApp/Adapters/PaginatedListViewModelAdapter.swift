@@ -6,7 +6,7 @@ import DemoCore
 /// Uses SKIE's automatic Flow→AsyncSequence conversion to eliminate FlowCollector boilerplate.
 @MainActor
 class PaginatedListViewModelAdapter: ObservableObject {
-    private let viewModel = PaginatedListViewModel()
+    let viewModel = PaginatedListViewModel()
 
     @Published private(set) var numbers: [Int] = []
     @Published private(set) var totalSize: Int = 0

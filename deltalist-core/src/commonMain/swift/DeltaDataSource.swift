@@ -3,74 +3,90 @@ import UIKit
 import Combine
 
 /// Generic UICollectionView data source that observes a DeltaList (Kotlin Flow<Delta<T>>).
-/// Equivalent to Android's DeltaAdapter.
+/// Equivalent to Android's DeltaAdapter. Supports both regular lists and soft/paginated lists.
 ///
-/// Uses UICollectionViewDiffableDataSource under the hood for efficient animated updates.
+/// Uses direct UICollectionViewDataSource implementation with performBatchUpdates for efficient updates.
+///
+/// For soft/paginated lists, provide a `loadingCellProvider` to display loading placeholders.
+/// The data source will automatically trigger loads when unloaded items become visible.
 ///
 /// Usage:
 /// ```swift
+/// // Regular list
 /// let dataSource = DeltaCollectionDataSource<Item>(
-///     collectionView: collectionView
-/// ) { collectionView, indexPath, item in
-///     let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "cell", for: indexPath)
-///     cell.textLabel?.text = item.title
-///     return cell
-/// }
+///     collectionView: collectionView,
+///     cellProvider: { collectionView, indexPath, item in
+///         // return configured cell
+///     }
+/// )
+///
+/// // Soft/paginated list
+/// let dataSource = DeltaCollectionDataSource<Item>(
+///     collectionView: collectionView,
+///     cellProvider: { collectionView, indexPath, item in
+///         // return configured cell for loaded item
+///     },
+///     loadingCellProvider: { collectionView, indexPath in
+///         // return loading placeholder cell
+///     }
+/// )
 ///
 /// dataSource.bind(to: viewModel.items)
 /// ```
 @available(iOS 14.0, *)
 @MainActor
-public class DeltaCollectionDataSource<T: AnyObject>: NSObject, UICollectionViewDelegate {
-
+public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
+    UICollectionViewDataSource,
+    UICollectionViewDelegate
+{
     // MARK: - Types
 
-    public typealias CellProvider = (UICollectionView, IndexPath, T) -> UICollectionViewCell?
+    public typealias CellProvider = (UICollectionView, IndexPath, T) -> UICollectionViewCell
+    public typealias LoadingCellProvider = (UICollectionView, IndexPath) -> UICollectionViewCell
     public typealias SupplementaryViewProvider = (UICollectionView, String, IndexPath) -> UICollectionReusableView?
 
     // MARK: - Properties
 
     private weak var collectionView: UICollectionView?
-    private var diffableDataSource: UICollectionViewDiffableDataSource<Int, UUID>!
-    private var items: [T] = []
-    private var shadowIds: [UUID] = []
+    private(set) public var items: [T] = []
     private var task: Task<Void, Never>?
+    private var hasReceivedInitialData = false
+
+    // Soft list support - store the current delta for pagination methods
+    private var currentDelta: AnyObject?
 
     private let cellProvider: CellProvider
+    private let loadingCellProvider: LoadingCellProvider?
+    private var supplementaryViewProvider: SupplementaryViewProvider?
 
-    /// The current items in the data source.
-    public var currentItems: [T] { items }
+    /// The total size of the list (including unloaded items for soft lists).
+    private(set) public var totalSize: Int = 0
 
     /// Callback when items are updated.
     public var onItemsChanged: (([T]) -> Void)?
+
+    /// Callback when a cell is selected.
+    public var onItemSelected: ((IndexPath, T) -> Void)?
 
     // MARK: - Initialization
 
     /// Creates a new DeltaCollectionDataSource.
     /// - Parameters:
     ///   - collectionView: The collection view to manage.
-    ///   - cellProvider: Closure that provides cells for items.
+    ///   - cellProvider: Closure that provides cells for loaded items.
+    ///   - loadingCellProvider: Optional closure that provides cells for unloaded items (for soft lists).
     public init(
         collectionView: UICollectionView,
-        cellProvider: @escaping CellProvider
+        cellProvider: @escaping CellProvider,
+        loadingCellProvider: LoadingCellProvider? = nil
     ) {
         self.collectionView = collectionView
         self.cellProvider = cellProvider
+        self.loadingCellProvider = loadingCellProvider
         super.init()
 
-        setupDiffableDataSource(collectionView: collectionView)
+        collectionView.dataSource = self
         collectionView.delegate = self
-    }
-
-    private func setupDiffableDataSource(collectionView: UICollectionView) {
-        diffableDataSource = UICollectionViewDiffableDataSource<Int, UUID>(
-            collectionView: collectionView
-        ) { [weak self] collectionView, indexPath, identifier in
-            guard let self = self else { return nil }
-            guard let index = self.shadowIds.firstIndex(of: identifier),
-                  index < self.items.count else { return nil }
-            return self.cellProvider(collectionView, indexPath, self.items[index])
-        }
     }
 
     // MARK: - Binding
@@ -78,10 +94,12 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject, UICollectionView
     /// Starts collecting deltas from a typed stream and applying them to the collection view.
     public func bind<S: AsyncSequence>(to stream: S) where S.Element == Delta<T> {
         unbind()
-        task = Task { @MainActor in
+        hasReceivedInitialData = false
+        task = Task { @MainActor [weak self] in
             do {
                 for try await delta in stream {
                     if Task.isCancelled { break }
+                    guard let self = self else { break }
                     self.applyDelta(delta)
                 }
             } catch {
@@ -93,54 +111,20 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject, UICollectionView
     /// Starts collecting deltas from an erased stream (for type-erased Kotlin flows).
     public func bind(erased stream: some AsyncSequence) {
         unbind()
-        task = Task { @MainActor in
+        hasReceivedInitialData = false
+        task = Task { @MainActor [weak self] in
             do {
                 for try await value in stream {
                     if Task.isCancelled { break }
+                    guard let self = self else { break }
+
                     if let delta = value as? Delta<T> {
                         self.applyDelta(delta)
                     } else if let delta = value as? Delta<AnyObject> {
-                        // The generic parameter might not match exactly due to module boundaries
-                        // Extract items and apply manually
-                        let extractedItems = delta.items.compactMap { $0 as? T }
-                        self.items = extractedItems
-                        self.onItemsChanged?(extractedItems)
-
-                        // Handle change type using SKIE's onEnum pattern
-                        switch onEnum(of: delta.change) {
-                        case .reload:
-                            self.shadowIds = extractedItems.map { _ in UUID() }
-                            self.applySnapshot(animatingDifferences: false)
-
-                        case .mutations(let mutations):
-                            for operation in mutations.operations {
-                                switch onEnum(of: operation) {
-                                case .insert(let insert):
-                                    let count = Int(insert.count)
-                                    let index = Int(insert.index)
-                                    let newIds = (0..<count).map { _ in UUID() }
-                                    self.shadowIds.insert(contentsOf: newIds, at: index)
-
-                                case .remove(let remove):
-                                    let count = Int(remove.count)
-                                    let index = Int(remove.index)
-                                    self.shadowIds.removeSubrange(index..<(index + count))
-
-                                case .update:
-                                    break
-
-                                case .move(let move):
-                                    let count = Int(move.count)
-                                    let fromIndex = Int(move.fromIndex)
-                                    let toIndex = Int(move.toIndex)
-                                    let movedIds = Array(self.shadowIds[fromIndex..<(fromIndex + count)])
-                                    self.shadowIds.removeSubrange(fromIndex..<(fromIndex + count))
-                                    let insertIndex = fromIndex < toIndex ? toIndex - count : toIndex
-                                    self.shadowIds.insert(contentsOf: movedIds, at: insertIndex)
-                                }
-                            }
-                            self.applySnapshot(animatingDifferences: true)
-                        }
+                        self.applyDeltaErased(delta)
+                    } else if let nsValue = value as? NSObject {
+                        // Cross-module: SKIE re-exports types with different names
+                        self.applyDeltaViaKVC(nsValue)
                     }
                 }
             } catch {
@@ -157,83 +141,294 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject, UICollectionView
 
     // MARK: - Delta Application
 
+    /// CRITICAL: Never access delta.items directly! It triggers NSArray bridging which
+    /// iterates the ENTIRE list - catastrophic for soft lists with thousands of items.
+    /// Always use delta.loadedItems() and delta.totalSize() instead.
+
     private func applyDelta(_ delta: Delta<T>) {
-        // Convert Kotlin List to Swift Array
-        items = delta.items as! [T]
+        currentDelta = delta
+
+        // Use loadedItems() to safely get only loaded items without triggering bridging
+        let loadedItems = delta.loadedItems()
+        items = loadedItems.compactMap { $0 as? T }
+
+        // Use totalSize() for soft lists
+        totalSize = Int(delta.totalSize())
+
+        onItemsChanged?(items)
+        applyChange(delta.change)
+    }
+
+    private func applyDeltaErased(_ delta: Delta<AnyObject>) {
+        currentDelta = delta
+
+        // Use loadedItems() to safely get only loaded items without triggering bridging
+        let loadedItems = delta.loadedItems()
+        items = loadedItems.compactMap { $0 as? T }
+
+        // Use totalSize() for soft lists
+        totalSize = Int(delta.totalSize())
+
+        onItemsChanged?(items)
+        applyChange(delta.change)
+    }
+
+    private func applyDeltaViaKVC(_ nsValue: NSObject) {
+        currentDelta = nsValue
+
+        // NEVER access "items" via KVC - it triggers the bridging catastrophe!
+        // Use loadedItems() method instead
+        var extractedItems: [T] = []
+
+        // Try calling loadedItems() method
+        if nsValue.responds(to: Selector(("loadedItems"))) {
+            if let loadedArray = nsValue.perform(Selector(("loadedItems")))?.takeUnretainedValue() as? [AnyObject] {
+                extractedItems = loadedArray.compactMap { $0 as? T }
+            }
+        }
+
+        items = extractedItems
+
+        // Get change object
+        guard let changeObj = nsValue.value(forKey: "change") else {
+            return
+        }
+
+        // Get totalSize for soft lists
+        if nsValue.responds(to: Selector(("totalSize"))) {
+            if let sizeResult = nsValue.perform(Selector(("totalSize")))?.takeUnretainedValue() as? NSNumber {
+                totalSize = sizeResult.intValue
+            } else {
+                totalSize = items.count
+            }
+        } else {
+            totalSize = items.count
+        }
+
         onItemsChanged?(items)
 
-        // Handle change type using SKIE's onEnum pattern
-        switch onEnum(of: delta.change) {
-        case .reload:
-            // Generate new shadow IDs for all items
-            shadowIds = items.map { _ in UUID() }
-            applySnapshot(animatingDifferences: false)
+        // On first data, always reload
+        if !hasReceivedInitialData {
+            hasReceivedInitialData = true
+            collectionView?.reloadData()
+            return
+        }
 
-        case .mutations(let mutations):
-            // Apply mutations to shadow IDs
-            for operation in mutations.operations {
-                switch onEnum(of: operation) {
-                case .insert(let insert):
-                    let count = Int(insert.count)
-                    let index = Int(insert.index)
-                    let newIds = (0..<count).map { _ in UUID() }
-                    shadowIds.insert(contentsOf: newIds, at: index)
+        // Determine change type and apply
+        let typeName = String(describing: type(of: changeObj))
 
-                case .remove(let remove):
-                    let count = Int(remove.count)
-                    let index = Int(remove.index)
-                    shadowIds.removeSubrange(index..<(index + count))
-
-                case .update:
-                    // Updates don't change IDs, just reconfigure cells
-                    break
-
-                case .move(let move):
-                    let count = Int(move.count)
-                    let fromIndex = Int(move.fromIndex)
-                    let toIndex = Int(move.toIndex)
-                    let movedIds = Array(shadowIds[fromIndex..<(fromIndex + count)])
-                    shadowIds.removeSubrange(fromIndex..<(fromIndex + count))
-                    let insertIndex = fromIndex < toIndex ? toIndex - count : toIndex
-                    shadowIds.insert(contentsOf: movedIds, at: insertIndex)
-                }
-            }
-            applySnapshot(animatingDifferences: true)
+        if typeName.contains("Reload") {
+            collectionView?.reloadData()
+        } else if typeName.contains("Mutations"), let mutationsNS = changeObj as? NSObject {
+            applyMutationsViaKVC(mutationsNS)
+        } else {
+            collectionView?.reloadData()
         }
     }
 
-    private func applySnapshot(animatingDifferences: Bool) {
-        var snapshot = NSDiffableDataSourceSnapshot<Int, UUID>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(shadowIds, toSection: 0)
-        diffableDataSource.apply(snapshot, animatingDifferences: animatingDifferences)
+    private func applyChange(_ change: Change) {
+        guard let collectionView = collectionView else { return }
+
+        // On first data, always reload to sync collection view state
+        if !hasReceivedInitialData {
+            hasReceivedInitialData = true
+            collectionView.reloadData()
+            return
+        }
+
+        switch onEnum(of: change) {
+        case .reload:
+            collectionView.reloadData()
+
+        case .mutations(let mutations):
+            collectionView.performBatchUpdates {
+                for operation in mutations.operations {
+                    switch onEnum(of: operation) {
+                    case .insert(let insert):
+                        let indexPaths = (0..<Int(insert.count)).map {
+                            IndexPath(item: Int(insert.index) + $0, section: 0)
+                        }
+                        collectionView.insertItems(at: indexPaths)
+
+                    case .remove(let remove):
+                        let indexPaths = (0..<Int(remove.count)).map {
+                            IndexPath(item: Int(remove.index) + $0, section: 0)
+                        }
+                        collectionView.deleteItems(at: indexPaths)
+
+                    case .update(let update):
+                        let indexPaths = (0..<Int(update.count)).map {
+                            IndexPath(item: Int(update.index) + $0, section: 0)
+                        }
+                        collectionView.reloadItems(at: indexPaths)
+
+                    case .move(let move):
+                        for i in 0..<Int(move.count) {
+                            let from = IndexPath(item: Int(move.fromIndex) + i, section: 0)
+                            let to = IndexPath(item: Int(move.toIndex) + i, section: 0)
+                            collectionView.moveItem(at: from, to: to)
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    // MARK: - Item Access
+    private func applyMutationsViaKVC(_ mutationsNS: NSObject) {
+        guard let operations = mutationsNS.value(forKey: "operations") as? [AnyObject] else {
+            collectionView?.reloadData()
+            return
+        }
 
-    /// Returns the item at the given index path.
-    public func item(at indexPath: IndexPath) -> T? {
-        guard indexPath.item < items.count else { return nil }
-        return items[indexPath.item]
+        collectionView?.performBatchUpdates {
+            for operation in operations {
+                guard let opNS = operation as? NSObject else { continue }
+                let opType = String(describing: type(of: operation))
+
+                if opType.contains("Insert") {
+                    let index = (opNS.value(forKey: "index") as? Int) ?? 0
+                    let count = (opNS.value(forKey: "count") as? Int) ?? 1
+                    let indexPaths = (0..<count).map { IndexPath(item: index + $0, section: 0) }
+                    collectionView?.insertItems(at: indexPaths)
+                } else if opType.contains("Remove") {
+                    let index = (opNS.value(forKey: "index") as? Int) ?? 0
+                    let count = (opNS.value(forKey: "count") as? Int) ?? 1
+                    let indexPaths = (0..<count).map { IndexPath(item: index + $0, section: 0) }
+                    collectionView?.deleteItems(at: indexPaths)
+                } else if opType.contains("Update") {
+                    let index = (opNS.value(forKey: "index") as? Int) ?? 0
+                    let count = (opNS.value(forKey: "count") as? Int) ?? 1
+                    let indexPaths = (0..<count).map { IndexPath(item: index + $0, section: 0) }
+                    collectionView?.reloadItems(at: indexPaths)
+                } else if opType.contains("Move") {
+                    let fromIndex = (opNS.value(forKey: "fromIndex") as? Int) ?? 0
+                    let toIndex = (opNS.value(forKey: "toIndex") as? Int) ?? 0
+                    let count = (opNS.value(forKey: "count") as? Int) ?? 1
+                    for i in 0..<count {
+                        collectionView?.moveItem(
+                            at: IndexPath(item: fromIndex + i, section: 0),
+                            to: IndexPath(item: toIndex + i, section: 0)
+                        )
+                    }
+                }
+            }
+        }
     }
 
-    /// Returns the item at the given index.
-    public func item(at index: Int) -> T? {
-        guard index < items.count else { return nil }
-        return items[index]
+    // MARK: - Soft List Support
+
+    /// Returns true if the item at the given index is loaded (for soft lists).
+    public func isLoadedAt(index: Int) -> Bool {
+        guard let delta = currentDelta as? NSObject else { return index < items.count }
+
+        // Try calling isLoadedAt(index:) method
+        if delta.responds(to: Selector(("isLoadedAtIndex:"))) {
+            if let result = delta.perform(Selector(("isLoadedAtIndex:")), with: NSNumber(value: Int32(index)))?.takeUnretainedValue() as? NSNumber {
+                return result.boolValue
+            }
+        }
+
+        // Fallback: item is loaded if it's within the items array
+        return index < items.count
+    }
+
+    /// Returns the loaded item at the given index, or nil if not loaded (for soft lists).
+    public func getLoadedItemAt(index: Int) -> T? {
+        guard let delta = currentDelta as? NSObject else {
+            return index < items.count ? items[index] : nil
+        }
+
+        // Try calling getLoadedItemAt(index:) method
+        if delta.responds(to: Selector(("getLoadedItemAtIndex:"))) {
+            if let result = delta.perform(Selector(("getLoadedItemAtIndex:")), with: NSNumber(value: Int32(index)))?.takeUnretainedValue() {
+                return result as? T
+            }
+        }
+
+        // Fallback
+        return index < items.count ? items[index] : nil
+    }
+
+    /// Triggers loading at the given index (for soft lists).
+    public func triggerLoadAt(index: Int) {
+        guard let delta = currentDelta as? NSObject else { return }
+
+        // Try calling triggerLoadAt(index:) method
+        if delta.responds(to: Selector(("triggerLoadAtIndex:"))) {
+            _ = delta.perform(Selector(("triggerLoadAtIndex:")), with: NSNumber(value: Int32(index)))
+        }
+    }
+
+    // MARK: - UICollectionViewDataSource
+
+    public func numberOfSections(in collectionView: UICollectionView) -> Int {
+        return 1
+    }
+
+    public func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        return totalSize
+    }
+
+    public func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+        let index = indexPath.item
+
+        // Check if item is loaded
+        if let item = getLoadedItemAt(index: index) {
+            return cellProvider(collectionView, indexPath, item)
+        } else if let loadingProvider = loadingCellProvider {
+            // Show loading cell for unloaded items
+            return loadingProvider(collectionView, indexPath)
+        } else if index < items.count {
+            // Fallback for regular lists
+            return cellProvider(collectionView, indexPath, items[index])
+        } else {
+            // Should not happen, but return empty cell as safety
+            fatalError("Index out of bounds: \(index) >= \(items.count), totalSize: \(totalSize)")
+        }
+    }
+
+    public func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath) -> UICollectionReusableView {
+        return supplementaryViewProvider?(collectionView, kind, indexPath) ?? UICollectionReusableView()
     }
 
     // MARK: - UICollectionViewDelegate
 
+    public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        // Trigger loading for unloaded items when they become visible
+        let index = indexPath.item
+        if !isLoadedAt(index: index) {
+            triggerLoadAt(index: index)
+        }
+    }
+
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
         // Subclasses can override to handle lazy item release
+    }
+
+    public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        if let item = getLoadedItemAt(index: indexPath.item) {
+            onItemSelected?(indexPath, item)
+        }
+        collectionView.deselectItem(at: indexPath, animated: true)
     }
 
     // MARK: - Supplementary Views
 
     /// Sets the supplementary view provider.
     public func setSupplementaryViewProvider(_ provider: SupplementaryViewProvider?) {
-        diffableDataSource.supplementaryViewProvider = provider
+        self.supplementaryViewProvider = provider
+    }
+
+    // MARK: - Item Access
+
+    /// Returns the item at the given index path (only loaded items).
+    public func item(at indexPath: IndexPath) -> T? {
+        return getLoadedItemAt(index: indexPath.item)
+    }
+
+    /// Returns the item at the given index (only loaded items).
+    public func item(at index: Int) -> T? {
+        return getLoadedItemAt(index: index)
     }
 
     deinit {

@@ -1,18 +1,21 @@
 import UIKit
-import Combine
+import DemoCore
+//import DeltaListCore
 
 /// UIKit implementation of the drag and drop demo.
+/// Uses Kotlin ViewModel directly with manual flow collection.
 @MainActor
 class DragDropViewController: UIViewController {
-    private let viewModel: DragDropViewModelAdapter
+    private let viewModel: DragDropViewModel
     private var collectionView: UICollectionView!
-    private var dataSource: UICollectionViewDiffableDataSource<Int, String>!
-    private var cancellables = Set<AnyCancellable>()
+    private var diffableDataSource: UICollectionViewDiffableDataSource<Int, String>!
+    private var items: [Item] = []
+    private var itemsTask: Task<Void, Never>?
     private var dragSourceIndex: Int?
     private var dropDestinationIndex: Int?
     private var isDragging: Bool = false
 
-    init(viewModel: DragDropViewModelAdapter) {
+    init(viewModel: DragDropViewModel) {
         self.viewModel = viewModel
         super.init(nibName: nil, bundle: nil)
     }
@@ -27,6 +30,12 @@ class DragDropViewController: UIViewController {
         setupDataSource()
         setupDragAndDrop()
         bindViewModel()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        itemsTask?.cancel()
+        itemsTask = nil
     }
 
     private func setupCollectionView() {
@@ -44,14 +53,14 @@ class DragDropViewController: UIViewController {
     }
 
     private func setupDataSource() {
-        let cellRegistration = UICollectionView.CellRegistration<DragDropCell, ItemWrapper> { [weak self] cell, indexPath, item in
-            let canMove = self?.viewModel.canMove(item: item) ?? false
+        let cellRegistration = UICollectionView.CellRegistration<DragDropCell, Item> { [weak self] cell, indexPath, item in
+            let canMove = self?.canMove(item: item) ?? false
             cell.configure(with: item, canMove: canMove)
         }
 
-        dataSource = UICollectionViewDiffableDataSource<Int, String>(collectionView: collectionView) { [weak self] collectionView, indexPath, itemId in
+        diffableDataSource = UICollectionViewDiffableDataSource<Int, String>(collectionView: collectionView) { [weak self] collectionView, indexPath, itemId in
             guard let self = self,
-                  let item = self.viewModel.items.first(where: { $0.id == itemId }) else {
+                  let item = self.items.first(where: { $0.id == itemId }) else {
                 return nil
             }
             return collectionView.dequeueConfiguredReusableCell(using: cellRegistration, for: indexPath, item: item)
@@ -65,23 +74,38 @@ class DragDropViewController: UIViewController {
     }
 
     private func bindViewModel() {
-        viewModel.$items
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] items in
-                self?.updateSnapshot(items: items)
+        // Use FlowCollector approach since MoveableDeltaList is an interface
+        itemsTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+
+            let collector = DeltaItemCollector { [weak self] (delta: DemoCore.Delta<Item>) in
+                guard let self = self else { return }
+                self.items = delta.items.compactMap { $0 as? Item }
+                self.updateSnapshot()
             }
-            .store(in: &cancellables)
+
+            do {
+                try await self.viewModel.items.collect(collector: collector)
+            } catch {
+                // Flow completed or was cancelled
+            }
+        }
     }
 
-    private func updateSnapshot(items: [ItemWrapper]) {
+    private func updateSnapshot() {
         // Skip snapshot updates during drag to avoid feedback loop
-        // UICollectionView handles visual reordering natively during drag
         guard !isDragging else { return }
 
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
         snapshot.appendItems(items.map { $0.id }, toSection: 0)
-        dataSource.apply(snapshot, animatingDifferences: true)
+        diffableDataSource.apply(snapshot, animatingDifferences: true)
+    }
+
+    // MARK: - Helpers
+
+    private func canMove(item: Item) -> Bool {
+        !item.title.contains("Pinned")
     }
 }
 
@@ -89,18 +113,18 @@ class DragDropViewController: UIViewController {
 
 extension DragDropViewController: UICollectionViewDragDelegate {
     func collectionView(_ collectionView: UICollectionView, itemsForBeginning session: UIDragSession, at indexPath: IndexPath) -> [UIDragItem] {
-        guard indexPath.item < viewModel.items.count else { return [] }
-        let item = viewModel.items[indexPath.item]
+        guard indexPath.item < items.count else { return [] }
+        let item = items[indexPath.item]
 
         // Don't allow dragging pinned items
-        guard viewModel.canMove(item: item) else { return [] }
+        guard canMove(item: item) else { return [] }
 
         isDragging = true
         dragSourceIndex = indexPath.item
         dropDestinationIndex = indexPath.item
 
-        // Begin drag in Kotlin model (but don't update preview during drag)
-        _ = viewModel.beginDrag(at: indexPath.item)
+        // Begin drag in Kotlin model
+        _ = viewModel.items.beginDrag(index: Int32(indexPath.item))
 
         let itemProvider = NSItemProvider(object: item.id as NSString)
         let dragItem = UIDragItem(itemProvider: itemProvider)
@@ -122,7 +146,6 @@ extension DragDropViewController: UICollectionViewDropDelegate {
         }
 
         if let destPath = destinationIndexPath {
-            // UICollectionView's destinationIndexPath is already the final position
             dropDestinationIndex = destPath.item
         }
 
@@ -131,7 +154,7 @@ extension DragDropViewController: UICollectionViewDropDelegate {
 
     func collectionView(_ collectionView: UICollectionView, performDropWith coordinator: UICollectionViewDropCoordinator) {
         guard dragSourceIndex != nil else {
-            viewModel.cancelDrag()
+            viewModel.items.cancelDrag()
             isDragging = false
             dragSourceIndex = nil
             dropDestinationIndex = nil
@@ -141,47 +164,75 @@ extension DragDropViewController: UICollectionViewDropDelegate {
         // Get destination from coordinator, fall back to tracked value
         let destIndex: Int
         if let destPath = coordinator.destinationIndexPath {
-            // UICollectionView's destinationIndexPath is already the final position
-            // (accounts for source removal with .insertAtDestinationIndexPath intent)
             destIndex = destPath.item
         } else if let tracked = dropDestinationIndex {
             destIndex = tracked
         } else {
             // No valid destination, cancel
-            viewModel.cancelDrag()
+            viewModel.items.cancelDrag()
             isDragging = false
             dragSourceIndex = nil
             dropDestinationIndex = nil
-            updateSnapshot(items: viewModel.items)
+            updateSnapshot()
             return
         }
 
         // Update preview to final destination and commit
-        viewModel.updateDragPreview(to: destIndex)
+        viewModel.items.updateDragPreview(toIndex: Int32(destIndex))
 
-        // IMPORTANT: Set isDragging to false BEFORE the async Task to prevent
-        // dropSessionDidEnd from calling cancelDrag() (which would race with commitDrag)
         isDragging = false
         dragSourceIndex = nil
         dropDestinationIndex = nil
 
         Task {
-            _ = await viewModel.commitDrag()
-            // Trigger snapshot update now that drag is complete
-            updateSnapshot(items: viewModel.items)
+            do {
+                _ = try await viewModel.items.commitDrag()
+            } catch {
+                // Drag commit failed
+            }
+            // Refresh after drag completes
+            updateSnapshot()
         }
     }
 
     func collectionView(_ collectionView: UICollectionView, dropSessionDidEnd session: UIDropSession) {
-        // Cancel the Kotlin drag only if the session ended without a successful drop.
-        // If performDropWith was called, isDragging will already be false.
         if isDragging {
-            viewModel.cancelDrag()
+            viewModel.items.cancelDrag()
             isDragging = false
             dragSourceIndex = nil
             dropDestinationIndex = nil
-            // Trigger snapshot update since drag was cancelled
-            updateSnapshot(items: viewModel.items)
+            updateSnapshot()
+        }
+    }
+}
+
+// MARK: - Delta Collector
+
+/// A FlowCollector implementation for Delta<Item> values.
+private final class DeltaItemCollector: DemoCore.Kotlinx_coroutines_coreFlowCollector {
+    private let onDelta: @MainActor @Sendable (DemoCore.Delta<Item>) -> Void
+
+    init(onDelta: @escaping @MainActor @Sendable (DemoCore.Delta<Item>) -> Void) {
+        self.onDelta = onDelta
+    }
+
+    @nonobjc func __emit(value: Any?) async throws {
+        guard let delta = value as? DemoCore.Delta<Item> else { return }
+        let callback = onDelta
+        await MainActor.run {
+            callback(delta)
+        }
+    }
+
+    func __emit(value: Any?, completionHandler: @escaping @Sendable ((any Error)?) -> Void) {
+        guard let delta = value as? DemoCore.Delta<Item> else {
+            completionHandler(nil)
+            return
+        }
+        let callback = onDelta
+        Task { @MainActor in
+            callback(delta)
+            completionHandler(nil)
         }
     }
 }
@@ -240,7 +291,7 @@ private class DragDropCell: UICollectionViewListCell {
         ])
     }
 
-    func configure(with item: ItemWrapper, canMove: Bool) {
+    func configure(with item: Item, canMove: Bool) {
         self.canMove = canMove
         titleLabel.text = item.title
         subtitleLabel.text = canMove ? "Long press to drag" : "Cannot be moved"

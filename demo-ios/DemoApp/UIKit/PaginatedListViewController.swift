@@ -1,15 +1,16 @@
 import UIKit
-import Combine
+import DemoCore
+//import DeltaListCore
 
 /// UIKit implementation of the paginated list demo.
+/// Uses DeltaCollectionDataSource with soft list support.
 @MainActor
 class PaginatedListViewController: UIViewController {
-    private let viewModel: PaginatedListViewModelAdapter
+    private let viewModel: PaginatedListViewModel
     private var collectionView: UICollectionView!
-    private var dataSource: UICollectionViewDiffableDataSource<Int, PaginatedItem>!
-    private var cancellables = Set<AnyCancellable>()
+    private var dataSource: DeltaCollectionDataSource<KotlinInt>!
 
-    init(viewModel: PaginatedListViewModelAdapter) {
+    init(viewModel: PaginatedListViewModel) {
         self.viewModel = viewModel
         super.init(nibName: nil, bundle: nil)
     }
@@ -22,7 +23,11 @@ class PaginatedListViewController: UIViewController {
         super.viewDidLoad()
         setupCollectionView()
         setupDataSource()
-        bindViewModel()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        dataSource.unbind()
     }
 
     private func setupCollectionView() {
@@ -30,7 +35,6 @@ class PaginatedListViewController: UIViewController {
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: layout)
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .systemBackground
-        collectionView.delegate = self
         view.addSubview(collectionView)
     }
 
@@ -41,77 +45,28 @@ class PaginatedListViewController: UIViewController {
     }
 
     private func setupDataSource() {
-        let numberCellRegistration = UICollectionView.CellRegistration<NumberCell, PaginatedItem> { cell, indexPath, item in
-            if case .loaded(let number, let index) = item {
-                cell.configure(number: number, index: index)
+        // Register cells
+        let numberCellRegistration = UICollectionView.CellRegistration<NumberCell, KotlinInt> { cell, indexPath, value in
+            cell.configure(number: value.intValue, index: indexPath.item)
+        }
+
+        let loadingCellRegistration = UICollectionView.CellRegistration<LoadingCell, Void> { cell, indexPath, _ in
+            cell.configure(index: indexPath.item)
+        }
+
+        // Create data source with soft list support
+        dataSource = DeltaCollectionDataSource<KotlinInt>(
+            collectionView: collectionView,
+            cellProvider: { collectionView, indexPath, value in
+                collectionView.dequeueConfiguredReusableCell(using: numberCellRegistration, for: indexPath, item: value)
+            },
+            loadingCellProvider: { collectionView, indexPath in
+                collectionView.dequeueConfiguredReusableCell(using: loadingCellRegistration, for: indexPath, item: ())
             }
-        }
+        )
 
-        let loadingCellRegistration = UICollectionView.CellRegistration<LoadingCell, PaginatedItem> { cell, indexPath, item in
-            cell.configure(index: item.index)
-        }
-
-        dataSource = UICollectionViewDiffableDataSource<Int, PaginatedItem>(collectionView: collectionView) { collectionView, indexPath, item in
-            switch item {
-            case .loaded:
-                return collectionView.dequeueConfiguredReusableCell(using: numberCellRegistration, for: indexPath, item: item)
-            case .loading:
-                return collectionView.dequeueConfiguredReusableCell(using: loadingCellRegistration, for: indexPath, item: item)
-            }
-        }
-    }
-
-    private func bindViewModel() {
-        // Listen to both totalSize and numbers changes to update the snapshot
-        Publishers.CombineLatest(viewModel.$totalSize, viewModel.$numbers)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] totalSize, _ in
-                self?.updateSnapshot(totalSize: totalSize)
-            }
-            .store(in: &cancellables)
-    }
-
-    private func updateSnapshot(totalSize: Int) {
-        var snapshot = NSDiffableDataSourceSnapshot<Int, PaginatedItem>()
-        snapshot.appendSections([0])
-
-        // Show totalSize items - each one is either loaded or loading
-        let items: [PaginatedItem] = (0..<totalSize).map { index in
-            if let number = viewModel.getLoadedItemAt(index: index) {
-                return .loaded(number, index: index)
-            } else {
-                return .loading(index)
-            }
-        }
-        snapshot.appendItems(items, toSection: 0)
-
-        dataSource.apply(snapshot, animatingDifferences: false)
-    }
-}
-
-// MARK: - UICollectionViewDelegate
-
-extension PaginatedListViewController: UICollectionViewDelegate {
-    func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-        // Trigger loading when a loading cell is displayed
-        guard let item = dataSource.itemIdentifier(for: indexPath) else { return }
-        if case .loading(let index) = item {
-            viewModel.triggerLoadAt(index: index)
-        }
-    }
-}
-
-// MARK: - Paginated Item
-
-private enum PaginatedItem: Hashable {
-    case loaded(Int, index: Int)
-    case loading(Int)
-
-    var index: Int {
-        switch self {
-        case .loaded(_, let index): return index
-        case .loading(let index): return index
-        }
+        // Bind to the paginated flow
+        dataSource.bind(erased: viewModel.paginatedNumbers)
     }
 }
 

@@ -187,11 +187,12 @@ private struct DragDropViewControllerRepresentable: UIViewControllerRepresentabl
     let viewModel: DragDropViewModelAdapter
 
     func makeUIViewController(context: Context) -> DragDropViewController {
-        DragDropViewController(viewModel: viewModel)
+        // Pass the Kotlin ViewModel directly to the UIKit controller
+        DragDropViewController(viewModel: viewModel.viewModel)
     }
 
     func updateUIViewController(_ uiViewController: DragDropViewController, context: Context) {
-        // Updates handled by Combine bindings in the view controller
+        // Updates handled by DeltaCollectionDataSource binding
     }
 }
 

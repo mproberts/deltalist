@@ -1,16 +1,13 @@
 import UIKit
 import DemoCore
-//import DeltaListCore
 
 /// UIKit implementation of the drag and drop demo.
-/// Uses Kotlin ViewModel directly with manual flow collection.
+/// Uses DeltaCollectionDataSource with MoveableDeltaList.
 @MainActor
 class DragDropViewController: UIViewController {
     private let viewModel: DragDropViewModel
     private var collectionView: UICollectionView!
-    private var diffableDataSource: UICollectionViewDiffableDataSource<Int, String>!
-    private var items: [Item] = []
-    private var itemsTask: Task<Void, Never>?
+    private var dataSource: DeltaCollectionDataSource<Item>!
     private var dragSourceIndex: Int?
     private var dropDestinationIndex: Int?
     private var isDragging: Bool = false
@@ -29,13 +26,11 @@ class DragDropViewController: UIViewController {
         setupCollectionView()
         setupDataSource()
         setupDragAndDrop()
-        bindViewModel()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        itemsTask?.cancel()
-        itemsTask = nil
+        dataSource.unbind()
     }
 
     private func setupCollectionView() {
@@ -58,48 +53,21 @@ class DragDropViewController: UIViewController {
             cell.configure(with: item, canMove: canMove)
         }
 
-        diffableDataSource = UICollectionViewDiffableDataSource<Int, String>(collectionView: collectionView) { [weak self] collectionView, indexPath, itemId in
-            guard let self = self,
-                  let item = self.items.first(where: { $0.id == itemId }) else {
-                return nil
+        dataSource = DeltaCollectionDataSource<Item>(
+            collectionView: collectionView,
+            cellProvider: { collectionView, indexPath, item in
+                collectionView.dequeueConfiguredReusableCell(using: cellRegistration, for: indexPath, item: item)
             }
-            return collectionView.dequeueConfiguredReusableCell(using: cellRegistration, for: indexPath, item: item)
-        }
+        )
+
+        // Bind using the MoveableDeltaList extension (handles FlowCollector internally)
+        dataSource.bind(moveable: viewModel.items)
     }
 
     private func setupDragAndDrop() {
         collectionView.dragDelegate = self
         collectionView.dropDelegate = self
         collectionView.dragInteractionEnabled = true
-    }
-
-    private func bindViewModel() {
-        // Use FlowCollector approach since MoveableDeltaList is an interface
-        itemsTask = Task { @MainActor [weak self] in
-            guard let self = self else { return }
-
-            let collector = DeltaItemCollector { [weak self] (delta: DemoCore.Delta<Item>) in
-                guard let self = self else { return }
-                self.items = delta.items.compactMap { $0 as? Item }
-                self.updateSnapshot()
-            }
-
-            do {
-                try await self.viewModel.items.collect(collector: collector)
-            } catch {
-                // Flow completed or was cancelled
-            }
-        }
-    }
-
-    private func updateSnapshot() {
-        // Skip snapshot updates during drag to avoid feedback loop
-        guard !isDragging else { return }
-
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(items.map { $0.id }, toSection: 0)
-        diffableDataSource.apply(snapshot, animatingDifferences: true)
     }
 
     // MARK: - Helpers
@@ -113,8 +81,7 @@ class DragDropViewController: UIViewController {
 
 extension DragDropViewController: UICollectionViewDragDelegate {
     func collectionView(_ collectionView: UICollectionView, itemsForBeginning session: UIDragSession, at indexPath: IndexPath) -> [UIDragItem] {
-        guard indexPath.item < items.count else { return [] }
-        let item = items[indexPath.item]
+        guard let item = dataSource.item(at: indexPath) else { return [] }
 
         // Don't allow dragging pinned items
         guard canMove(item: item) else { return [] }
@@ -173,7 +140,6 @@ extension DragDropViewController: UICollectionViewDropDelegate {
             isDragging = false
             dragSourceIndex = nil
             dropDestinationIndex = nil
-            updateSnapshot()
             return
         }
 
@@ -190,8 +156,6 @@ extension DragDropViewController: UICollectionViewDropDelegate {
             } catch {
                 // Drag commit failed
             }
-            // Refresh after drag completes
-            updateSnapshot()
         }
     }
 
@@ -201,38 +165,6 @@ extension DragDropViewController: UICollectionViewDropDelegate {
             isDragging = false
             dragSourceIndex = nil
             dropDestinationIndex = nil
-            updateSnapshot()
-        }
-    }
-}
-
-// MARK: - Delta Collector
-
-/// A FlowCollector implementation for Delta<Item> values.
-private final class DeltaItemCollector: DemoCore.Kotlinx_coroutines_coreFlowCollector {
-    private let onDelta: @MainActor @Sendable (DemoCore.Delta<Item>) -> Void
-
-    init(onDelta: @escaping @MainActor @Sendable (DemoCore.Delta<Item>) -> Void) {
-        self.onDelta = onDelta
-    }
-
-    @nonobjc func __emit(value: Any?) async throws {
-        guard let delta = value as? DemoCore.Delta<Item> else { return }
-        let callback = onDelta
-        await MainActor.run {
-            callback(delta)
-        }
-    }
-
-    func __emit(value: Any?, completionHandler: @escaping @Sendable ((any Error)?) -> Void) {
-        guard let delta = value as? DemoCore.Delta<Item> else {
-            completionHandler(nil)
-            return
-        }
-        let callback = onDelta
-        Task { @MainActor in
-            callback(delta)
-            completionHandler(nil)
         }
     }
 }

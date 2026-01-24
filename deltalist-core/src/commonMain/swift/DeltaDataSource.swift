@@ -133,10 +133,36 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
         }
     }
 
+    /// Manually apply a delta value. Use this when you need to handle flow collection yourself
+    /// (e.g., for protocol types like MoveableDeltaList that don't get AsyncSequence conformance).
+    ///
+    /// Usage:
+    /// ```swift
+    /// let collector = MyFlowCollector { delta in
+    ///     dataSource.apply(delta: delta)
+    /// }
+    /// try await flow.collect(collector: collector)
+    /// ```
+    public func apply(delta: Any) {
+        if let typedDelta = delta as? Delta<T> {
+            applyDelta(typedDelta)
+        } else if let anyDelta = delta as? Delta<AnyObject> {
+            applyDeltaErased(anyDelta)
+        } else if let nsValue = delta as? NSObject {
+            applyDeltaViaKVC(nsValue)
+        }
+    }
+
     /// Stops collecting deltas.
     public func unbind() {
         task?.cancel()
         task = nil
+    }
+
+    /// Sets the binding task for external collectors (e.g., MoveableDeltaList extensions).
+    /// Call unbind() before setting a new task.
+    public func setBindingTask(_ newTask: Task<Void, Never>) {
+        task = newTask
     }
 
     // MARK: - Delta Application
@@ -1023,6 +1049,39 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
 
     deinit {
         task?.cancel()
+    }
+}
+
+// MARK: - Delta Flow Collector
+
+/// A FlowCollector implementation for collecting Delta values from Kotlin Flows.
+/// Used for protocol types like MoveableDeltaList that don't get AsyncSequence conformance from SKIE.
+@available(iOS 14.0, *)
+public final class DeltaFlowCollector<T: AnyObject>: Kotlinx_coroutines_coreFlowCollector {
+    private let onDelta: @MainActor @Sendable (Any) -> Void
+
+    public init(onDelta: @escaping @MainActor @Sendable (Any) -> Void) {
+        self.onDelta = onDelta
+    }
+
+    @nonobjc public func __emit(value: Any?) async throws {
+        guard let value = value else { return }
+        let callback = onDelta
+        await MainActor.run {
+            callback(value)
+        }
+    }
+
+    public func __emit(value: Any?, completionHandler: @escaping @Sendable ((any Error)?) -> Void) {
+        guard let value = value else {
+            completionHandler(nil)
+            return
+        }
+        let callback = onDelta
+        Task { @MainActor in
+            callback(value)
+            completionHandler(nil)
+        }
     }
 }
 #endif

@@ -244,3 +244,49 @@ fun <T> Delta<T>.triggerLoadAt(index: Int) {
         // Expected for unloaded items
     }
 }
+
+// ============================================================================
+// SectionedDelta helpers - these avoid iOS bridging issues
+// when accessing delta.sections from Swift
+// ============================================================================
+
+/**
+ * Returns the number of sections in a SectionedDelta.
+ * This is safe to call from iOS - pass the SectionedDelta directly to avoid bridging issues.
+ */
+fun <S, T> SectionedDelta<S, T>.sectionCount(): Int = sections.size
+
+/**
+ * Returns the section at the given index, or null if out of bounds.
+ * This is safe to call from iOS - pass the SectionedDelta directly to avoid bridging issues.
+ */
+fun <S, T> SectionedDelta<S, T>.getSectionAt(index: Int): Section<S, T>? =
+    sections.getOrNull(index)
+
+/**
+ * Returns the header at the given section index, or null if out of bounds.
+ * This is safe to call from iOS - pass the SectionedDelta directly to avoid bridging issues.
+ */
+fun <S, T> SectionedDelta<S, T>.getHeaderAt(sectionIndex: Int): S? =
+    sections.getOrNull(sectionIndex)?.header
+
+/**
+ * Returns the number of items in the section at the given index, or 0 if out of bounds.
+ * This is safe to call from iOS - pass the SectionedDelta directly to avoid bridging issues.
+ */
+fun <S, T> SectionedDelta<S, T>.getItemCountAt(sectionIndex: Int): Int =
+    sections.getOrNull(sectionIndex)?.items?.size ?: 0
+
+/**
+ * Returns the item at the given section and item indices, or null if out of bounds.
+ * This is safe to call from iOS - pass the SectionedDelta directly to avoid bridging issues.
+ */
+fun <S, T> SectionedDelta<S, T>.getItemAt(sectionIndex: Int, itemIndex: Int): T? =
+    sections.getOrNull(sectionIndex)?.items?.getOrNull(itemIndex)
+
+/**
+ * Returns all items in the section at the given index.
+ * This is safe to call from iOS - pass the SectionedDelta directly to avoid bridging issues.
+ */
+fun <S, T> SectionedDelta<S, T>.getItemsAt(sectionIndex: Int): List<T> =
+    sections.getOrNull(sectionIndex)?.items ?: emptyList()

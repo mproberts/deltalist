@@ -88,6 +88,18 @@ interface MoveableDeltaList<T> : DeltaList<T> {
     suspend fun commitDrag(): Boolean
 
     /**
+     * Commit the drag to a specific destination index.
+     *
+     * Use this when the UI framework (e.g., UICollectionView) handles drag preview
+     * animations and you only need to commit the final position without emitting
+     * intermediate preview updates.
+     *
+     * @param toIndex The final destination index
+     * @return true if the move was successfully persisted, false otherwise
+     */
+    suspend fun commitDrag(toIndex: Int): Boolean
+
+    /**
      * Cancel the current drag without committing.
      * The list reverts to the original order before the drag started.
      */
@@ -213,6 +225,44 @@ internal class MoveableDeltaListImpl<T>(
         }
     }
 
+    override suspend fun commitDrag(toIndex: Int): Boolean {
+        val current = _dragState.value
+        if (current !is DragState.Dragging) return false
+
+        val fromIndex = originalDragIndex
+        val clampedToIndex = toIndex.coerceIn(0, maxOf(0, (_currentDelta.value?.items?.size ?: 1) - 1))
+
+        // No-op if dropped in the same position
+        if (fromIndex == clampedToIndex) {
+            cleanup()
+            return true
+        }
+
+        // Check if this move would be allowed
+        if (canMove != null && !canMove.invoke(current.item, fromIndex, clampedToIndex)) {
+            cleanup()
+            return false
+        }
+
+        // Transition directly to committing state without emitting preview
+        // The UI framework (UICollectionView) handles the visual animation
+        _dragState.value = DragState.Committing(current.item, fromIndex, clampedToIndex)
+
+        return try {
+            val success = onMove(current.item, fromIndex, clampedToIndex)
+            if (success) {
+                cleanup()
+                true
+            } else {
+                revert()
+                false
+            }
+        } catch (e: Exception) {
+            revert()
+            false
+        }
+    }
+
     override fun cancelDrag() {
         val current = _dragState.value
         if (current is DragState.Dragging) {
@@ -286,7 +336,8 @@ internal class MoveableDeltaListImpl<T>(
                             )
                         }
                         // Mark confirmed so subsequent deltas pass through
-                        _dragState.value = currentState.copy(confirmed = true)
+                        // Use compareAndSet to avoid race with cleanup() setting Idle
+                        _dragState.compareAndSet(currentState, currentState.copy(confirmed = true))
                         if (isExpectedMove) null else delta
                     }
                 }

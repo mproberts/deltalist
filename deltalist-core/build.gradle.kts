@@ -1,3 +1,7 @@
+import co.touchlab.skie.configuration.EnumInterop
+import co.touchlab.skie.configuration.FlowInterop
+import co.touchlab.skie.configuration.SealedInterop
+import co.touchlab.skie.configuration.SuspendInterop
 import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
 
 plugins {
@@ -7,7 +11,12 @@ plugins {
 
 skie {
     features {
-        enableSwiftUIObservingPreview = true
+        group {
+            FlowInterop.Enabled(false)
+            SealedInterop.Enabled(false)
+            EnumInterop.Enabled(false)
+            SuspendInterop.Enabled(false)
+        }
     }
 }
 

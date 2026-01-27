@@ -90,8 +90,15 @@ extension DragDropViewController: UICollectionViewDragDelegate {
         dragSourceIndex = indexPath.item
         dropDestinationIndex = indexPath.item
 
-        // Begin drag in Kotlin model
-        _ = viewModel.items.beginDrag(index: Int32(indexPath.item))
+        print("[DragDrop] beginDrag at index \(indexPath.item)")
+        // Begin drag in Kotlin model - check return value to ensure state was updated
+        guard viewModel.items.beginDrag(index: Int32(indexPath.item)) else {
+            print("[DragDrop] beginDrag failed, aborting drag")
+            isDragging = false
+            dragSourceIndex = nil
+            dropDestinationIndex = nil
+            return []
+        }
 
         let itemProvider = NSItemProvider(object: item.id as NSString)
         let dragItem = UIDragItem(itemProvider: itemProvider)
@@ -113,6 +120,9 @@ extension DragDropViewController: UICollectionViewDropDelegate {
         }
 
         if let destPath = destinationIndexPath {
+            if destPath.item != dropDestinationIndex {
+                print("[DragDrop] dropSessionDidUpdate: destination changed to \(destPath.item)")
+            }
             dropDestinationIndex = destPath.item
         }
 
@@ -120,7 +130,9 @@ extension DragDropViewController: UICollectionViewDropDelegate {
     }
 
     func collectionView(_ collectionView: UICollectionView, performDropWith coordinator: UICollectionViewDropCoordinator) {
-        guard dragSourceIndex != nil else {
+        print("[DragDrop] performDropWith called, dragSourceIndex=\(String(describing: dragSourceIndex))")
+        guard let sourceIndex = dragSourceIndex else {
+            print("[DragDrop] No dragSourceIndex, cancelling")
             viewModel.items.cancelDrag()
             isDragging = false
             dragSourceIndex = nil
@@ -132,10 +144,13 @@ extension DragDropViewController: UICollectionViewDropDelegate {
         let destIndex: Int
         if let destPath = coordinator.destinationIndexPath {
             destIndex = destPath.item
+            print("[DragDrop] Using coordinator destination: \(destIndex)")
         } else if let tracked = dropDestinationIndex {
             destIndex = tracked
+            print("[DragDrop] Using tracked destination: \(destIndex)")
         } else {
             // No valid destination, cancel
+            print("[DragDrop] No valid destination, cancelling")
             viewModel.items.cancelDrag()
             isDragging = false
             dragSourceIndex = nil
@@ -143,18 +158,21 @@ extension DragDropViewController: UICollectionViewDropDelegate {
             return
         }
 
-        // Update preview to final destination and commit
-        viewModel.items.updateDragPreview(toIndex: Int32(destIndex))
+        print("[DragDrop] Committing move from \(sourceIndex) to \(destIndex)")
 
         isDragging = false
         dragSourceIndex = nil
         dropDestinationIndex = nil
 
+        // Use commitDrag(toIndex:) which skips the preview emission
+        // UICollectionView handles the visual animation, we just need to persist
         Task {
             do {
-                _ = try await viewModel.items.commitDrag()
+                print("[DragDrop] Calling commitDrag(toIndex: \(destIndex))")
+                let result = try await viewModel.items.commitDrag(toIndex: Int32(destIndex))
+                print("[DragDrop] commitDrag() returned: \(result)")
             } catch {
-                // Drag commit failed
+                print("[DragDrop] commitDrag() failed: \(error)")
             }
         }
     }

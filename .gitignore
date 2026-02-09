@@ -6,3 +6,4 @@ xcuserdata
 /.kotlin
 /.idea
 /.gradle
+/demo-react/webpack.config.d

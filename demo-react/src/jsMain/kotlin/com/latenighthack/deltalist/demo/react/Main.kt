@@ -1,11 +1,13 @@
 package com.latenighthack.deltalist.demo.react
 
-import react.create
-import react.dom.client.createRoot
-import web.dom.document
-import web.dom.ElementId
+import com.latenighthack.deltalist.demo.JsDemoApp
+
+@JsModule("app-entry")
+@JsNonModule
+external object AppEntry {
+    fun mount(app: dynamic)
+}
 
 fun main() {
-    val root = document.getElementById(ElementId("root")) ?: error("Root element not found")
-    createRoot(root).render(App.create())
+    AppEntry.mount(JsDemoApp())
 }

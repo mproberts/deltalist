@@ -40,6 +40,9 @@ kotlin {
             api(project(":deltalist-core"))
             api(libs.kotlinx.coroutines.core)
         }
+        jsMain.dependencies {
+            api(project(":deltalist-react"))
+        }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
             implementation(libs.kotlinx.coroutines.test)

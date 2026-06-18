@@ -12,43 +12,48 @@ fun <T> concatSections(vararg flows: DeltaList<T>): DeltaList<T> =
     concatSections(flows.toList())
 
 fun <T> concatSections(flows: List<DeltaList<T>>): DeltaList<T> {
-    if (flows.isEmpty()) return flowOf(Delta(emptyList(), Change.Reload))
+    if (flows.isEmpty()) return flowOf(Delta(emptyList<T>().asSoftList(), Change.Reload))
     if (flows.size == 1) return flows[0]
+
+    // Per-source previous emissions: under `combine`, only the source whose Delta reference
+    // changed actually emitted this tick; the rest carry stale changes that must not be replayed.
+    var prevDeltas: Array<Delta<T>>? = null
+    var prevCombinedLoaded: List<T>? = null
 
     return combine(flows) { deltas ->
         val combinedItems = ConcatenatedMultiList(deltas.map { it.items })
+        val newLoaded = combinedItems.softLoadedItems()
 
-        val anyReload = deltas.any { it.change is Change.Reload }
-        if (anyReload) {
-            return@combine Delta(combinedItems, Change.Reload)
+        val previous = prevDeltas
+        val fullyLoaded = newLoaded.size == combinedItems.size
+
+        val emitterReloaded = deltas.withIndex().any { (i, d) ->
+            (previous == null || d !== previous[i]) && d.change is Change.Reload
         }
 
-        val allMutations = mutableListOf<Mutation>()
-
-        for ((index, delta) in deltas.withIndex()) {
-            val offset = deltas.take(index).sumOf { it.items.size }
-
-            when (val change = delta.change) {
-                is Change.Reload -> { }
-                is Change.Mutations -> {
-                    for (mutation in change.operations) {
-                        val translated = when (mutation) {
-                            is Mutation.Insert -> Mutation.Insert(offset + mutation.index, mutation.count)
-                            is Mutation.Remove -> Mutation.Remove(offset + mutation.index, mutation.count)
-                            is Mutation.Update -> Mutation.Update(offset + mutation.index, mutation.count)
-                            is Mutation.Move -> Mutation.Move(
-                                offset + mutation.fromIndex,
-                                offset + mutation.toIndex,
-                                mutation.count
-                            )
-                        }
-                        allMutations.add(translated)
-                    }
+        val change: Change = if (previous == null || emitterReloaded || !fullyLoaded) {
+            Change.Reload
+        } else {
+            val ops = mutableListOf<Mutation>()
+            for ((index, delta) in deltas.withIndex()) {
+                val emitted = delta !== previous[index]
+                val mutations = delta.change as? Change.Mutations
+                if (emitted && mutations != null) {
+                    val offset = deltas.take(index).sumOf { it.items.size }
+                    mutations.operations.forEach { ops += it.offsetBy(offset) }
                 }
+            }
+            val prev = prevCombinedLoaded
+            if (ops.isEmpty() || prev == null) {
+                Change.Reload
+            } else {
+                val rebuilt = runCatching { applyChange(prev, Change.Mutations(ops), newLoaded) }.getOrNull()
+                if (rebuilt == newLoaded) Change.Mutations(ops) else Change.Reload
             }
         }
 
-        val change = if (allMutations.isEmpty()) Change.Reload else Change.Mutations(allMutations)
+        prevDeltas = deltas.copyOf()
+        prevCombinedLoaded = newLoaded
         Delta(combinedItems, change)
     }
 }
@@ -62,17 +67,18 @@ fun <T> List<DeltaList<T>>.concat(): DeltaList<T> = concatSections(this)
  * Lazy list that concatenates multiple lists.
  */
 internal class ConcatenatedMultiList<T>(
-    private val lists: List<List<T>>
-) : AbstractList<T>() {
+    private val lists: List<SoftList<T>>
+) : AbstractSoftList<T>() {
     override val size: Int = lists.sumOf { it.size }
 
-    override fun get(index: Int): T {
+    override fun softGet(index: Int): SoftValue<T>? {
+        if (index < 0 || index >= size) return null
         var remaining = index
         for (list in lists) {
-            if (remaining < list.size) return list[remaining]
+            if (remaining < list.size) return list.softGet(remaining)
             remaining -= list.size
         }
-        throw IndexOutOfBoundsException("Index $index out of bounds for size $size")
+        return null
     }
 }
 
@@ -95,39 +101,44 @@ fun <S, T> sectionedDeltaList(
         itemFlow.map { delta -> header to delta }
     }
 
+    // Only the section whose Delta reference changed this tick actually emitted; stale changes
+    // on the other sections must be ignored, otherwise the operator over-reloads (or worse,
+    // attributes a change to the wrong section) once several sections have each mutated.
+    var prevDeltas: Array<Delta<T>>? = null
+
     return combine(flows) { headerDeltaPairs ->
         val sectionList = headerDeltaPairs.map { (header, delta) ->
             Section(header, delta.items)
         }
 
-        val anyReload = headerDeltaPairs.any { (_, delta) -> delta.change is Change.Reload }
-        if (anyReload) {
-            return@combine SectionedDelta(sectionList, SectionedChange.Reload)
+        val previous = prevDeltas
+        val emitterReloaded = headerDeltaPairs.withIndex().any { (i, pair) ->
+            (previous == null || pair.second !== previous[i]) && pair.second.change is Change.Reload
         }
 
-        // Find sections with item changes
-        val itemChanges = headerDeltaPairs.mapIndexedNotNull { index, (_, delta) ->
-            when (val change = delta.change) {
-                is Change.Reload -> null
-                is Change.Mutations -> {
-                    if (change.operations.isNotEmpty()) index to change.operations else null
+        val change = if (previous == null || emitterReloaded) {
+            SectionedChange.Reload
+        } else {
+            // Item changes from sections that actually emitted this tick.
+            val itemChanges = headerDeltaPairs.mapIndexedNotNull { index, (_, delta) ->
+                val emitted = delta !== previous[index]
+                val mutations = delta.change as? Change.Mutations
+                if (emitted && mutations != null && mutations.operations.isNotEmpty()) {
+                    index to mutations.operations
+                } else null
+            }
+            when {
+                itemChanges.isEmpty() -> SectionedChange.Reload
+                itemChanges.size == 1 -> {
+                    val (sectionIndex, mutations) = itemChanges[0]
+                    SectionedChange.Items(sectionIndex, mutations)
                 }
+                // Multiple sections genuinely changed in one tick - reload for simplicity.
+                else -> SectionedChange.Reload
             }
         }
 
-        val change = when {
-            itemChanges.isEmpty() -> SectionedChange.Reload
-            itemChanges.size == 1 -> {
-                val (sectionIndex, mutations) = itemChanges[0]
-                SectionedChange.Items(sectionIndex, mutations)
-            }
-            else -> {
-                // Multiple sections changed - emit reload for simplicity
-                // Could be optimized to emit multiple Items changes
-                SectionedChange.Reload
-            }
-        }
-
+        prevDeltas = Array(headerDeltaPairs.size) { headerDeltaPairs[it].second }
         SectionedDelta(sectionList, change)
     }
 }

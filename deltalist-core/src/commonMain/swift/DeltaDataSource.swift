@@ -41,11 +41,21 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
     /// The total size of the list (including unloaded items for soft lists).
     private(set) public var totalSize: Int = 0
 
+    /// The item count the collection view currently reflects. Stepped one mutation at a
+    /// time while a Change.Mutations is applied so that each per-operation batch update
+    /// stays internally consistent (running-index semantics). Equals totalSize at rest.
+    private var appliedCount: Int = 0
+
     /// Callback when items are updated.
     public var onItemsChanged: (([T]) -> Void)?
 
     /// Callback when a cell is selected.
     public var onItemSelected: ((IndexPath, T) -> Void)?
+
+    /// Callback invoked when the bound delta stream terminates with an error. Defaults to
+    /// nil (silent). Wire this to your telemetry/logging so upstream failures are visible
+    /// instead of looking identical to normal completion.
+    public var onError: ((Error) -> Void)?
 
     // MARK: - Initialization
 
@@ -77,7 +87,8 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
                     self.applyDelta(delta)
                 }
             } catch {
-                // Stream completed or was cancelled
+                // Surface the failure if a handler is set; otherwise complete silently.
+                self?.onError?(error)
             }
         }
     }
@@ -102,7 +113,8 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
                     }
                 }
             } catch {
-                // Stream completed or was cancelled
+                // Surface the failure if a handler is set; otherwise complete silently.
+                self?.onError?(error)
             }
         }
     }
@@ -110,15 +122,11 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
     /// Manually apply a delta value. Use this when you need to handle flow collection yourself
     /// (e.g., for protocol types like MoveableDeltaList that don't get AsyncSequence conformance).
     public func apply(delta: Any) {
-        print("[DeltaDataSource] apply(delta:) called with type: \(type(of: delta))")
         if let typedDelta = delta as? Delta<T> {
-            print("[DeltaDataSource] Using applyDelta (typed)")
             applyDelta(typedDelta)
         } else if let anyDelta = delta as? Delta<AnyObject> {
-            print("[DeltaDataSource] Using applyDeltaErased")
             applyDeltaErased(anyDelta)
         } else {
-            print("[DeltaDataSource] Using applyDeltaAny")
             applyDeltaAny(delta as AnyObject)
         }
     }
@@ -202,6 +210,7 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
             if !hasReceivedInitialData {
                 hasReceivedInitialData = true
             }
+            appliedCount = totalSize
             collectionView?.reloadData()
         }
 
@@ -212,64 +221,96 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
     private func applyChange(_ change: Change) {
         guard let collectionView = collectionView else { return }
 
-        // On first data, always reload to sync collection view state
+        // On first data, always reload to sync collection view state.
         if !hasReceivedInitialData {
             hasReceivedInitialData = true
+            appliedCount = totalSize
             collectionView.reloadData()
             return
         }
 
-        // Use direct type casting with nested Kotlin type names
         if change is Change.Reload {
-            print("[DeltaDataSource] Applying Reload")
+            appliedCount = totalSize
             collectionView.reloadData()
-        } else if let mutations = change as? Change.Mutations {
-            print("[DeltaDataSource] Applying Mutations: \(mutations.operations.count) operations")
-            for (idx, operation) in mutations.operations.enumerated() {
-                if let move = operation as? Mutation.Move {
-                    print("[DeltaDataSource]   [\(idx)] Move: from=\(move.fromIndex) to=\(move.toIndex) count=\(move.count)")
-                } else if let insert = operation as? Mutation.Insert {
-                    print("[DeltaDataSource]   [\(idx)] Insert: index=\(insert.index) count=\(insert.count)")
-                } else if let remove = operation as? Mutation.Remove {
-                    print("[DeltaDataSource]   [\(idx)] Remove: index=\(remove.index) count=\(remove.count)")
-                } else if let update = operation as? Mutation.Update {
-                    print("[DeltaDataSource]   [\(idx)] Update: index=\(update.index) count=\(update.count)")
-                } else {
-                    print("[DeltaDataSource]   [\(idx)] Unknown: \(type(of: operation))")
-                }
-            }
-
-            collectionView.performBatchUpdates {
-                for operation in mutations.operations {
-                    if let insert = operation as? Mutation.Insert {
-                        let indexPaths = (0..<Int(insert.count)).map {
-                            IndexPath(item: Int(insert.index) + $0, section: 0)
-                        }
-                        collectionView.insertItems(at: indexPaths)
-                    } else if let remove = operation as? Mutation.Remove {
-                        let indexPaths = (0..<Int(remove.count)).map {
-                            IndexPath(item: Int(remove.index) + $0, section: 0)
-                        }
-                        collectionView.deleteItems(at: indexPaths)
-                    } else if let update = operation as? Mutation.Update {
-                        let indexPaths = (0..<Int(update.count)).map {
-                            IndexPath(item: Int(update.index) + $0, section: 0)
-                        }
-                        collectionView.reloadItems(at: indexPaths)
-                    } else if let move = operation as? Mutation.Move {
-                        for i in 0..<Int(move.count) {
-                            let from = IndexPath(item: Int(move.fromIndex) + i, section: 0)
-                            let to = IndexPath(item: Int(move.toIndex) + i, section: 0)
-                            collectionView.moveItem(at: from, to: to)
-                        }
-                    }
-                }
-            }
-        } else {
-            // Unknown change type, reload
-            print("[DeltaDataSource] Unknown change type: \(type(of: change)), reloading")
-            collectionView.reloadData()
+            return
         }
+
+        guard let mutations = change as? Change.Mutations else {
+            // Unknown change type: rebuild safely.
+            appliedCount = totalSize
+            collectionView.reloadData()
+            return
+        }
+
+        // The operations use running-index (sequential) coordinates. Replaying them in a
+        // single performBatchUpdates would misinterpret them as simultaneous before/after
+        // coordinates and crash (NSInternalInconsistencyException) whenever a Move is mixed
+        // with structural ops. Instead apply each operation in its own batch, stepping
+        // appliedCount so numberOfItemsInSection stays consistent at every step.
+        //
+        // If the stream is inconsistent with the snapshot's size change (e.g. an upstream
+        // desync), fall back to a full reload rather than crash.
+        guard mutationsAreConsistent(mutations.operations, startCount: appliedCount, endCount: totalSize) else {
+            appliedCount = totalSize
+            collectionView.reloadData()
+            return
+        }
+
+        for operation in mutations.operations {
+            collectionView.performBatchUpdates {
+                if let insert = operation as? Mutation.Insert {
+                    let indexPaths = (0..<Int(insert.count)).map {
+                        IndexPath(item: Int(insert.index) + $0, section: 0)
+                    }
+                    appliedCount += Int(insert.count)
+                    collectionView.insertItems(at: indexPaths)
+                } else if let remove = operation as? Mutation.Remove {
+                    let indexPaths = (0..<Int(remove.count)).map {
+                        IndexPath(item: Int(remove.index) + $0, section: 0)
+                    }
+                    appliedCount -= Int(remove.count)
+                    collectionView.deleteItems(at: indexPaths)
+                } else if let update = operation as? Mutation.Update {
+                    let indexPaths = (0..<Int(update.count)).map {
+                        IndexPath(item: Int(update.index) + $0, section: 0)
+                    }
+                    collectionView.reloadItems(at: indexPaths)
+                } else if let move = operation as? Mutation.Move {
+                    // Single-item move per the Change contract; count is unchanged.
+                    let from = IndexPath(item: Int(move.fromIndex), section: 0)
+                    let to = IndexPath(item: Int(move.toIndex), section: 0)
+                    collectionView.moveItem(at: from, to: to)
+                }
+            }
+        }
+    }
+
+    /// Simulates the running item count through `operations`, bounds-checking each step.
+    /// Returns true only if every operation is in range and the final count equals
+    /// `endCount` (mirrors the Android adapter's guard).
+    private func mutationsAreConsistent(_ operations: [Mutation], startCount: Int, endCount: Int) -> Bool {
+        var count = startCount
+        for operation in operations {
+            if let insert = operation as? Mutation.Insert {
+                let c = Int(insert.count), i = Int(insert.index)
+                if c < 0 || i < 0 || i > count { return false }
+                count += c
+            } else if let remove = operation as? Mutation.Remove {
+                let c = Int(remove.count), i = Int(remove.index)
+                if c < 0 || i < 0 || i + c > count { return false }
+                count -= c
+            } else if let update = operation as? Mutation.Update {
+                let c = Int(update.count), i = Int(update.index)
+                if c < 0 || i < 0 || i + c > count { return false }
+            } else if let move = operation as? Mutation.Move {
+                if Int(move.count) != 1 { return false }
+                let f = Int(move.fromIndex), t = Int(move.toIndex)
+                if f < 0 || f >= count || t < 0 || t >= count { return false }
+            } else {
+                return false
+            }
+        }
+        return count == endCount
     }
 
     // MARK: - Soft List Support
@@ -338,7 +379,9 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
     }
 
     public func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        return totalSize
+        // Reflects intermediate state while a Change.Mutations is being applied; equals
+        // totalSize at rest.
+        return appliedCount
     }
 
     public func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
@@ -351,7 +394,10 @@ public class DeltaCollectionDataSource<T: AnyObject>: NSObject,
         } else if index < items.count {
             return cellProvider(collectionView, indexPath, items[index])
         } else {
-            fatalError("Index out of bounds: \(index) >= \(items.count), totalSize: \(totalSize)")
+            // Never fatalError in a cell provider: a transient inconsistency during an
+            // animated update must be recoverable, not a hard crash. Return an empty
+            // placeholder; the next consistent snapshot will reconcile.
+            return loadingCellProvider?(collectionView, indexPath) ?? UICollectionViewCell()
         }
     }
 
@@ -434,11 +480,22 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
     private var task: Task<Void, Never>?
     private var hasReceivedInitialData = false
 
+    // Stepped counts so per-operation batch updates stay consistent during application
+    // (mirrors DeltaCollectionDataSource). At rest, appliedSectionCount == sections.count
+    // and applyingSection == -1.
+    private var appliedSectionCount: Int = 0
+    private var applyingSection: Int = -1
+    private var applyingItemCount: Int = 0
+
     private let cellProvider: CellProvider
     private let headerProvider: HeaderProvider?
 
     /// Callback when sections are updated.
     public var onSectionsChanged: (([SectionData]) -> Void)?
+
+    /// Callback invoked when the bound delta stream terminates with an error. Defaults to
+    /// nil (silent). Wire this to telemetry to make upstream failures visible.
+    public var onError: ((Error) -> Void)?
 
     /// Callback when a cell is selected.
     public var onItemSelected: ((IndexPath, T) -> Void)?
@@ -473,23 +530,17 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
                     if Task.isCancelled { break }
                     guard let self = self else { break }
 
-                    // Debug: print actual type
-                    print("[SectionedDataSource] Received value of type: \(type(of: value))")
-
                     if let sectionedDelta = value as? SectionedDelta<H, T> {
-                        print("[SectionedDataSource] Cast to SectionedDelta<H, T> succeeded")
                         self.applySectionedDelta(sectionedDelta)
                     } else if let sectionedDelta = value as? SectionedDelta<AnyObject, AnyObject> {
-                        print("[SectionedDataSource] Cast to SectionedDelta<AnyObject, AnyObject> succeeded")
                         self.applySectionedDeltaErased(sectionedDelta)
                     } else {
-                        print("[SectionedDataSource] Falling back to applySectionedDeltaAny")
                         // Cross-module compatibility
                         self.applySectionedDeltaAny(value as AnyObject)
                     }
                 }
             } catch {
-                print("[SectionedDataSource] Error: \(error)")
+                self?.onError?(error)
             }
         }
     }
@@ -546,15 +597,12 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
         // Cross-module fallback: use Obj-C runtime to call methods directly
         // This handles cases like DemoCoreSectionedDelta where generic casts fail
 
-        print("[SectionedDataSource] applySectionedDeltaAny - type: \(type(of: delta))")
-
         // Use Obj-C runtime directly - don't use KVC as it doesn't work with Kotlin classes
         let sectionCount = callSectionCountViaRuntime(delta)
 
         if sectionCount == 0 {
-            print("[SectionedDataSource] Section count is 0 or method not found")
-            // Check if we got 0 because there are no sections, or because the call failed
-            // Try one more cast approach
+            // Check if we got 0 because there are no sections, or because the call failed.
+            // Try one more cast approach.
             if let anyDelta = delta as? SectionedDelta<AnyObject, AnyObject> {
                 let count = Int(anyDelta.sectionCount())
                 if count > 0 {
@@ -563,23 +611,20 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
                 }
             }
             sections = []
+            appliedSectionCount = 0
             onSectionsChanged?([])
             collectionView?.reloadData()
             return
         }
 
-        print("[SectionedDataSource] Section count: \(sectionCount)")
-
         // Extract sections using Obj-C runtime calls
         var newSections: [SectionData] = []
         for sectionIdx in 0..<sectionCount {
             guard let header = callGetHeaderAt(delta, sectionIndex: Int32(sectionIdx)) as? H else {
-                print("[SectionedDataSource] Could not get header at \(sectionIdx)")
                 continue
             }
 
             let itemCount = callGetItemCountAt(delta, sectionIndex: Int32(sectionIdx))
-            print("[SectionedDataSource] Section \(sectionIdx) has \(itemCount) items")
 
             var items: [T] = []
             for itemIdx in 0..<itemCount {
@@ -597,17 +642,21 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
         if !hasReceivedInitialData {
             hasReceivedInitialData = true
             sections = newSections
+            appliedSectionCount = newSections.count
             onSectionsChanged?(newSections)
             collectionView?.reloadData()
             return
         }
 
+        let oldSectionCount = sections.count
+        let oldItemCounts = sections.map { $0.items.count }
         sections = newSections
         onSectionsChanged?(newSections)
 
         if let change = change {
-            applySectionedChange(change)
+            applySectionedChange(change, oldSectionCount: oldSectionCount, oldItemCounts: oldItemCounts)
         } else {
+            appliedSectionCount = newSections.count
             collectionView?.reloadData()
         }
     }
@@ -635,7 +684,6 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
         let sel = Selector(("sectionCount"))
         guard obj.responds(to: sel),
               let method = class_getInstanceMethod(type(of: obj), sel) else {
-            print("[SectionedDataSource] sectionCount selector not found")
             return 0
         }
         let imp = method_getImplementation(method)
@@ -696,6 +744,11 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
     }
 
     private func applyChanges(newSections: [SectionData], change: SectionedChange) {
+        // Capture pre-change counts before overwriting `sections` so the per-operation
+        // stepping below can report consistent intermediate counts.
+        let oldSectionCount = sections.count
+        let oldItemCounts = sections.map { $0.items.count }
+
         sections = newSections
         onSectionsChanged?(newSections)
 
@@ -703,28 +756,37 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
 
         if !hasReceivedInitialData {
             hasReceivedInitialData = true
+            appliedSectionCount = sections.count
             collectionView.reloadData()
             return
         }
 
-        applySectionedChange(change)
+        applySectionedChange(change, oldSectionCount: oldSectionCount, oldItemCounts: oldItemCounts)
     }
 
-    private func applySectionedChange(_ change: SectionedChange) {
+    private func applySectionedChange(_ change: SectionedChange, oldSectionCount: Int, oldItemCounts: [Int]) {
         guard let collectionView = collectionView else { return }
 
-        // Use direct type casting with nested Kotlin type names
         if change is SectionedChange.Reload {
+            appliedSectionCount = sections.count
             collectionView.reloadData()
-        } else if let sectionChanges = change as? SectionedChange.Sections {
-            collectionView.performBatchUpdates {
-                for mutation in sectionChanges.mutations {
+            return
+        }
+
+        if let sectionChanges = change as? SectionedChange.Sections {
+            // Section-level mutations in running coordinates: apply one per batch, stepping
+            // appliedSectionCount (which numberOfSections returns during application).
+            appliedSectionCount = oldSectionCount
+            for mutation in sectionChanges.mutations {
+                collectionView.performBatchUpdates {
                     if let insert = mutation as? SectionMutation.Insert {
-                        let sectionIndices = IndexSet(Int(insert.index)..<Int(insert.index + insert.count))
-                        collectionView.insertSections(sectionIndices)
+                        let c = Int(insert.count)
+                        appliedSectionCount += c
+                        collectionView.insertSections(IndexSet(Int(insert.index)..<Int(insert.index) + c))
                     } else if let remove = mutation as? SectionMutation.Remove {
-                        let sectionIndices = IndexSet(Int(remove.index)..<Int(remove.index + remove.count))
-                        collectionView.deleteSections(sectionIndices)
+                        let c = Int(remove.count)
+                        appliedSectionCount -= c
+                        collectionView.deleteSections(IndexSet(Int(remove.index)..<Int(remove.index) + c))
                     } else if let update = mutation as? SectionMutation.Update {
                         collectionView.reloadSections(IndexSet(integer: Int(update.index)))
                     } else if let move = mutation as? SectionMutation.Move {
@@ -732,46 +794,92 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
                     }
                 }
             }
-        } else if let itemChanges = change as? SectionedChange.Items {
+            appliedSectionCount = sections.count
+            return
+        }
+
+        if let itemChanges = change as? SectionedChange.Items {
             let sectionIndex = Int(itemChanges.section)
-            collectionView.performBatchUpdates {
-                for mutation in itemChanges.mutations {
+            guard sectionIndex >= 0, sectionIndex < sections.count, sectionIndex < oldItemCounts.count else {
+                appliedSectionCount = sections.count
+                collectionView.reloadData()
+                return
+            }
+            let startCount = oldItemCounts[sectionIndex]
+            let endCount = sections[sectionIndex].items.count
+            guard mutationsAreConsistent(itemChanges.mutations, startCount: startCount, endCount: endCount) else {
+                collectionView.reloadSections(IndexSet(integer: sectionIndex))
+                return
+            }
+
+            applyingSection = sectionIndex
+            applyingItemCount = startCount
+            for mutation in itemChanges.mutations {
+                collectionView.performBatchUpdates {
                     if let insert = mutation as? Mutation.Insert {
-                        let indexPaths = (0..<Int(insert.count)).map {
-                            IndexPath(item: Int(insert.index) + $0, section: sectionIndex)
-                        }
+                        let c = Int(insert.count)
+                        let indexPaths = (0..<c).map { IndexPath(item: Int(insert.index) + $0, section: sectionIndex) }
+                        applyingItemCount += c
                         collectionView.insertItems(at: indexPaths)
                     } else if let remove = mutation as? Mutation.Remove {
-                        let indexPaths = (0..<Int(remove.count)).map {
-                            IndexPath(item: Int(remove.index) + $0, section: sectionIndex)
-                        }
+                        let c = Int(remove.count)
+                        let indexPaths = (0..<c).map { IndexPath(item: Int(remove.index) + $0, section: sectionIndex) }
+                        applyingItemCount -= c
                         collectionView.deleteItems(at: indexPaths)
                     } else if let update = mutation as? Mutation.Update {
-                        let indexPaths = (0..<Int(update.count)).map {
-                            IndexPath(item: Int(update.index) + $0, section: sectionIndex)
-                        }
+                        let indexPaths = (0..<Int(update.count)).map { IndexPath(item: Int(update.index) + $0, section: sectionIndex) }
                         collectionView.reloadItems(at: indexPaths)
                     } else if let move = mutation as? Mutation.Move {
-                        for i in 0..<Int(move.count) {
-                            let from = IndexPath(item: Int(move.fromIndex) + i, section: sectionIndex)
-                            let to = IndexPath(item: Int(move.toIndex) + i, section: sectionIndex)
-                            collectionView.moveItem(at: from, to: to)
-                        }
+                        let from = IndexPath(item: Int(move.fromIndex), section: sectionIndex)
+                        let to = IndexPath(item: Int(move.toIndex), section: sectionIndex)
+                        collectionView.moveItem(at: from, to: to)
                     }
                 }
             }
-        } else {
-            collectionView.reloadData()
+            applyingSection = -1
+            return
         }
+
+        appliedSectionCount = sections.count
+        collectionView.reloadData()
+    }
+
+    /// Simulates the running item count through `operations`, bounds-checking each step.
+    private func mutationsAreConsistent(_ operations: [Mutation], startCount: Int, endCount: Int) -> Bool {
+        var count = startCount
+        for operation in operations {
+            if let insert = operation as? Mutation.Insert {
+                let c = Int(insert.count), i = Int(insert.index)
+                if c < 0 || i < 0 || i > count { return false }
+                count += c
+            } else if let remove = operation as? Mutation.Remove {
+                let c = Int(remove.count), i = Int(remove.index)
+                if c < 0 || i < 0 || i + c > count { return false }
+                count -= c
+            } else if let update = operation as? Mutation.Update {
+                let c = Int(update.count), i = Int(update.index)
+                if c < 0 || i < 0 || i + c > count { return false }
+            } else if let move = operation as? Mutation.Move {
+                if Int(move.count) != 1 { return false }
+                let f = Int(move.fromIndex), t = Int(move.toIndex)
+                if f < 0 || f >= count || t < 0 || t >= count { return false }
+            } else {
+                return false
+            }
+        }
+        return count == endCount
     }
 
     // MARK: - UICollectionViewDataSource
 
     public func numberOfSections(in collectionView: UICollectionView) -> Int {
-        return sections.count
+        // Reflects intermediate state while section-level mutations are applied.
+        return appliedSectionCount
     }
 
     public func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        // Reflects intermediate state for the section currently being mutated.
+        if section == applyingSection { return applyingItemCount }
         guard section < sections.count else { return 0 }
         return sections[section].items.count
     }
@@ -779,7 +887,9 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
     public func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         guard indexPath.section < sections.count,
               indexPath.item < sections[indexPath.section].items.count else {
-            fatalError("Index out of bounds: section \(indexPath.section), item \(indexPath.item)")
+            // Never fatalError in a cell provider: a transient inconsistency during an
+            // animated update must be recoverable. Return an empty placeholder.
+            return UICollectionViewCell()
         }
         let item = sections[indexPath.section].items[indexPath.item]
         return cellProvider(collectionView, indexPath, item)
@@ -847,6 +957,10 @@ public class StableDeltaCollectionDataSource<T: AnyObject>: NSObject, UICollecti
     /// Callback when items are updated.
     public var onItemsChanged: (([T]) -> Void)?
 
+    /// Invoked if the bound delta stream terminates with an error. Defaults to nil
+    /// (silent); set it to route upstream failures to telemetry.
+    public var onError: ((Error) -> Void)?
+
     public init(
         collectionView: UICollectionView,
         stableIdExtractor: @escaping (T) -> Int32,
@@ -879,7 +993,9 @@ public class StableDeltaCollectionDataSource<T: AnyObject>: NSObject, UICollecti
                     if Task.isCancelled { break }
                     self.applyDelta(delta)
                 }
-            } catch {}
+            } catch {
+                self.onError?(error)
+            }
         }
     }
 
@@ -898,7 +1014,9 @@ public class StableDeltaCollectionDataSource<T: AnyObject>: NSObject, UICollecti
                         self.applyDeltaAny(value as AnyObject)
                     }
                 }
-            } catch {}
+            } catch {
+                self.onError?(error)
+            }
         }
     }
 
@@ -990,25 +1108,9 @@ public class StableDeltaCollectionDataSource<T: AnyObject>: NSObject, UICollecti
 }
 
 // MARK: - Protocol Interfaces for Cross-Module Compatibility
-
-/// Protocol for accessing Delta properties without direct type coupling.
-/// This protocol is used when generic type casts fail across module boundaries.
-@objc public protocol DeltaProtocol {
-    var change: Change { get }
-    func loadedItems() -> [Any]
-    func totalSize() -> Int32
-    func isLoadedAt(index: Int32) -> Bool
-    func getLoadedItemAt(index: Int32) -> Any?
-    func triggerLoadAt(index: Int32)
-}
-
-/// Protocol for accessing SectionedDelta properties.
-/// WARNING: Accessing the `sections` property triggers NSArray bridging which
-/// iterates the entire list. Use Kotlin helper methods when possible.
-@objc public protocol SectionedDeltaProtocol {
-    var change: SectionedChange { get }
-    var sections: [Any] { get }
-}
+//
+// `DeltaProtocol` and `SectionedDeltaProtocol` are defined in DeltaList.swift (outside this file's
+// `#if canImport(UIKit)`) so both the UIKit data sources and the SwiftUI wrappers can share them.
 
 /// Protocol for accessing Section properties.
 /// WARNING: Accessing the `items` property triggers NSArray bridging.

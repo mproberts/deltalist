@@ -97,11 +97,11 @@ class JsSectionedListViewModel {
 @JsExport
 class JsPaginatedListViewModel {
     private val vm = PaginatedListViewModel()
-    private var latestItems: List<Any?>? = null
+    private var latestItems: com.latenighthack.deltalist.SoftList<Any?>? = null
 
     @Suppress("UNCHECKED_CAST")
     val items: Any = vm.paginatedNumbers.onEach { delta ->
-        latestItems = delta.items as List<Any?>
+        latestItems = delta.items as com.latenighthack.deltalist.SoftList<Any?>
     }
     val loadingDirection: Any = vm.paginatedLoadingDirection.map { it?.name?.lowercase() }
     val loadedCount: Any = vm.paginatedLoadedCount

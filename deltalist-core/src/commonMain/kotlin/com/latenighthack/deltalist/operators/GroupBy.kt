@@ -15,7 +15,7 @@ fun <T, K> DeltaList<T>.groupBy(
 
     collect { delta ->
         val groups = linkedMapOf<K, MutableList<T>>()
-        for (item in delta.items) {
+        for (item in delta.items.softLoadedItems()) {
             val key = keySelector(item)
             groups.getOrPut(key) { mutableListOf() }.add(item)
         }
@@ -57,7 +57,7 @@ fun <T, K, S> DeltaList<T>.groupBy(
 
     collect { delta ->
         val groups = linkedMapOf<K, MutableList<T>>()
-        for (item in delta.items) {
+        for (item in delta.items.softLoadedItems()) {
             val key = keySelector(item)
             groups.getOrPut(key) { mutableListOf() }.add(item)
         }

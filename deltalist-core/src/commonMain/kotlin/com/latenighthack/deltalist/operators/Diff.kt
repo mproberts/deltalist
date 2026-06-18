@@ -4,8 +4,20 @@ import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
 import com.latenighthack.deltalist.Mutation
+import com.latenighthack.deltalist.asSoftList
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+
+/**
+ * Lifts a single, already-loaded list into a one-shot [DeltaList]: emits exactly one
+ * [Delta] carrying the whole list as a [Change.Reload].
+ *
+ * This is the in-memory on-ramp for static data. There is nothing to diff against (a
+ * single snapshot), so no id selector is needed; apply [com.latenighthack.deltalist.operators.withStableIds]
+ * downstream if you need stable keys.
+ */
+fun <T> List<T>.toDeltaList(): DeltaList<T> = flowOf(Delta(asSoftList(), Change.Reload))
 
 /**
  * Convenience method for self-keyed items
@@ -37,19 +49,17 @@ fun <T, ID> Flow<List<T>>.asDeltaList(idSelector: (T) -> ID): DeltaList<T> = flo
 
     collect { currentItems ->
         val prev = previousItems
-        if (prev == null) {
+        val change = if (prev == null) {
             // First emission - always reload
-            emit(Delta(currentItems, Change.Reload))
+            Change.Reload
         } else {
-            val mutations = computeDiff(prev, currentItems, idSelector)
-            if (mutations.isEmpty()) {
-                // No changes detected, but still emit for consistency
-                // (The list reference may have changed even if content is same)
-                emit(Delta(currentItems, Change.Mutations(emptyList())))
-            } else {
-                emit(Delta(currentItems, Change.Mutations(mutations)))
-            }
+            // computeDiff returns null when the idSelector is non-injective (duplicate
+            // ids) and a safe minimal diff can't be guaranteed; fall back to a Reload.
+            computeDiff(prev, currentItems, idSelector)
+                ?.let { Change.Mutations(it) }
+                ?: Change.Reload
         }
+        emit(Delta(currentItems.asSoftList(), change))
         previousItems = currentItems
     }
 }
@@ -57,112 +67,97 @@ fun <T, ID> Flow<List<T>>.asDeltaList(idSelector: (T) -> ID): DeltaList<T> = flo
 /**
  * Computes the mutations needed to transform [oldList] into [newList].
  *
- * Algorithm overview:
- * 1. Build maps of ID -> (index, item) for both lists
- * 2. Identify removed items (in old, not in new)
- * 3. Identify inserted items (in new, not in old)
- * 4. Identify moved items (same ID, different position after removals/insertions)
- * 5. Identify updated items (same ID, different content)
+ * Returns `null` when [idSelector] is non-injective (the same id appears more than
+ * once in either list). A correct minimal diff can't be guaranteed in that case, so
+ * callers should fall back to [Change.Reload].
  *
- * The mutations are generated in an order that maintains valid indices:
- * - Removes are applied from highest to lowest index
- * - Inserts are applied from lowest to highest index
- * - Moves are computed on the intermediate state
- * - Updates are applied last
+ * The operations honor the contract documented on [applyChange]: they are applied
+ * **sequentially** in running (post-prior-op) coordinates, and are emitted
+ * left-to-right so that after each operation the running list's prefix already
+ * matches [newList] up to that index. The phases are:
+ * 1. Remove every id that is absent from [newList] (left-to-right; consecutive
+ *    removals coalesce).
+ * 2. Walk target positions `0..newList.size-1`; at each position either keep the
+ *    item already there, [Mutation.Insert] a newly-introduced item, or
+ *    [Mutation.Move] an existing item into place.
+ * 3. [Mutation.Update] any retained item whose content changed.
+ *
+ * Items that are already in the correct relative order are never moved, so pure
+ * insert / remove / append / prepend changes emit zero moves.
  */
 private fun <T, ID> computeDiff(
     oldList: List<T>,
     newList: List<T>,
     idSelector: (T) -> ID
-): List<Mutation> {
+): List<Mutation>? {
     if (oldList.isEmpty() && newList.isEmpty()) {
         return emptyList()
     }
 
-    // Build ID -> (index, item) maps
-    val oldById = oldList.withIndex().associate { (index, item) -> idSelector(item) to IndexedItem(index, item) }
-    val newById = newList.withIndex().associate { (index, item) -> idSelector(item) to IndexedItem(index, item) }
+    val oldIds = oldList.map(idSelector)
+    val newIds = newList.map(idSelector)
 
-    val oldIds = oldById.keys
-    val newIds = newById.keys
+    // Reject non-injective id selectors: a stable diff is only well-defined when ids
+    // are unique within each snapshot. The caller falls back to a Reload.
+    val oldIdSet = oldIds.toHashSet()
+    val newIdSet = newIds.toHashSet()
+    if (oldIdSet.size != oldIds.size || newIdSet.size != newIds.size) {
+        return null
+    }
 
-    // Identify removals and insertions
-    val removedIds = oldIds - newIds
-    val insertedIds = newIds - oldIds
-    val commonIds = oldIds.intersect(newIds)
+    val newIndexById = HashMap<ID, Int>(newIds.size)
+    for ((index, id) in newIds.withIndex()) newIndexById[id] = index
 
-    // Simulate the mutations to track index changes
     val mutations = mutableListOf<Mutation>()
 
-    // Working state: maps current position to ID
-    // We'll track IDs and their positions as we apply mutations
-    val workingIds = oldList.map { idSelector(it) }.toMutableList()
+    // Running list of ids; transformed in place to match newIds.
+    val working = oldIds.toMutableList()
 
-    // Step 1: Process removals (highest index first to avoid shifting issues)
-    val removalsInOrder = removedIds
-        .mapNotNull { id -> oldById[id]?.let { id to it.index } }
-        .sortedByDescending { it.second }
-
-    for ((id, _) in removalsInOrder) {
-        val currentIndex = workingIds.indexOf(id)
-        if (currentIndex >= 0) {
-            mutations.add(Mutation.Remove(currentIndex, 1))
-            workingIds.removeAt(currentIndex)
+    // Phase 1: remove ids absent from newList (left-to-right; running index).
+    var i = 0
+    while (i < working.size) {
+        if (working[i] !in newIdSet) {
+            mutations.add(Mutation.Remove(i, 1))
+            working.removeAt(i)
+        } else {
+            i++
         }
     }
 
-    // Step 2: Process insertions (in order of target position)
-    val insertionsInOrder = insertedIds
-        .mapNotNull { id -> newById[id]?.let { id to it.index } }
-        .sortedBy { it.second }
-
-    for ((id, targetIndex) in insertionsInOrder) {
-        // Insert at the target position (clamped to valid range)
-        val insertIndex = minOf(targetIndex, workingIds.size)
-        mutations.add(Mutation.Insert(insertIndex, 1))
-        workingIds.add(insertIndex, id)
-    }
-
-    // Step 3: Process moves
-    // At this point, workingIds has all the same IDs as newList, but possibly in different order
-    // We need to sort them to match newList order
-
-    // Build target order
-    val targetOrder = newList.map { idSelector(it) }
-
-    // Move items to their correct positions
-    for (targetIndex in targetOrder.indices) {
-        val expectedId = targetOrder[targetIndex]
-        val currentIndex = workingIds.indexOf(expectedId)
-
-        if (currentIndex != targetIndex && currentIndex >= 0) {
-            mutations.add(Mutation.Move(currentIndex, targetIndex, 1))
-            val movedId = workingIds.removeAt(currentIndex)
-            workingIds.add(targetIndex, movedId)
+    // Phase 2: build toward newList left-to-right. After handling index t,
+    // working[0..t] == newIds[0..t], so working still holds every retained id.
+    for (t in newIds.indices) {
+        val desired = newIds[t]
+        if (t < working.size && working[t] == desired) {
+            continue
+        }
+        if (desired in oldIdSet) {
+            // Retained id currently sitting further along; move it into place.
+            val from = working.indexOf(desired)
+            mutations.add(Mutation.Move(from, t, 1))
+            working.removeAt(from)
+            working.add(t, desired)
+        } else {
+            // Brand-new id; insert it.
+            mutations.add(Mutation.Insert(t, 1))
+            working.add(t, desired)
         }
     }
 
-    // Step 4: Process updates (items with same ID but different content)
-    // At this point, indices should match between workingIds and targetOrder
-    for ((id, newIndexedItem) in newById) {
-        if (id in commonIds) {
-            val oldItem = oldById[id]?.item
-            val newItem = newIndexedItem.item
-
-            // Check if content changed (using equals)
-            if (oldItem != newItem) {
-                val currentIndex = workingIds.indexOf(id)
-                if (currentIndex >= 0) {
-                    mutations.add(Mutation.Update(currentIndex, 1))
-                }
-            }
+    // Phase 3: content updates for retained items (ids in both lists).
+    val oldItemById = HashMap<ID, T>(oldIds.size)
+    for (item in oldList) oldItemById[idSelector(item)] = item
+    for (t in newList.indices) {
+        val newItem = newList[t]
+        val id = newIds[t]
+        val oldItem = oldItemById[id]
+        if (oldItem != null && oldItem != newItem) {
+            mutations.add(Mutation.Update(t, 1))
         }
     }
 
     return coalesceMutations(mutations)
 }
-
-private data class IndexedItem<T>(val index: Int, val item: T)
 
 /**
  * Coalesces consecutive mutations of the same type into single mutations with count > 1.

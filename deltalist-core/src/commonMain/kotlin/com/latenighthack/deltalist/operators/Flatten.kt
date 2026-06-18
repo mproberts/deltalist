@@ -130,7 +130,7 @@ internal class FlattenedSectionList<S, T, R>(
     private val headerMapper: ((S) -> R)?,
     private val itemMapper: (T) -> R,
     private val footerMapper: ((S, List<T>) -> R)?
-) : AbstractList<R>(), SoftList<R> {
+) : AbstractSoftList<R>() {
 
     override val size: Int = sections.sumOf { section ->
         var count = section.items.size
@@ -139,59 +139,28 @@ internal class FlattenedSectionList<S, T, R>(
         count
     }
 
-    override fun get(index: Int): R {
-        var remaining = index
-        for (section in sections) {
-            // Header
-            if (headerMapper != null) {
-                if (remaining == 0) return headerMapper.invoke(section.header)
-                remaining--
-            }
-
-            // Items
-            if (remaining < section.items.size) {
-                return itemMapper(section.items[remaining])
-            }
-            remaining -= section.items.size
-
-            // Footer
-            if (footerMapper != null) {
-                if (remaining == 0) return footerMapper.invoke(section.header, section.items)
-                remaining--
-            }
-        }
-        throw IndexOutOfBoundsException("Index $index out of bounds for size $size")
-    }
-
     override fun softGet(index: Int): SoftValue<R>? {
         if (index < 0 || index >= size) return null
 
         var remaining = index
         for (section in sections) {
-            // Header - always present (not from a SoftList source)
             if (headerMapper != null) {
                 if (remaining == 0) return SoftValue.Present(headerMapper.invoke(section.header))
                 remaining--
             }
 
-            // Items - may be from a SoftList
+            // Section items may be soft; propagate load state.
             if (remaining < section.items.size) {
-                val items = section.items
-                return if (items is SoftList<T>) {
-                    when (val soft = items.softGet(remaining)) {
-                        is SoftValue.Present -> SoftValue.Present(itemMapper(soft.value))
-                        is SoftValue.NotLoaded -> soft
-                        null -> null
-                    }
-                } else {
-                    SoftValue.Present(itemMapper(items[remaining]))
+                return when (val soft = section.items.softGet(remaining)) {
+                    is SoftValue.Present -> SoftValue.Present(itemMapper(soft.value))
+                    is SoftValue.NotLoaded -> soft
+                    null -> null
                 }
             }
             remaining -= section.items.size
 
-            // Footer - always present (not from a SoftList source)
             if (footerMapper != null) {
-                if (remaining == 0) return SoftValue.Present(footerMapper.invoke(section.header, section.items))
+                if (remaining == 0) return SoftValue.Present(footerMapper.invoke(section.header, section.items.softLoadedItems()))
                 remaining--
             }
         }
@@ -205,20 +174,9 @@ internal class FlattenedSectionList<S, T, R>(
  */
 internal class FlattenedItemsList<S, T>(
     private val sections: List<Section<S, T>>
-) : AbstractList<T>(), SoftList<T> {
+) : AbstractSoftList<T>() {
 
     override val size: Int = sections.sumOf { it.items.size }
-
-    override fun get(index: Int): T {
-        var remaining = index
-        for (section in sections) {
-            if (remaining < section.items.size) {
-                return section.items[remaining]
-            }
-            remaining -= section.items.size
-        }
-        throw IndexOutOfBoundsException("Index $index out of bounds for size $size")
-    }
 
     override fun softGet(index: Int): SoftValue<T>? {
         if (index < 0 || index >= size) return null
@@ -226,12 +184,8 @@ internal class FlattenedItemsList<S, T>(
         var remaining = index
         for (section in sections) {
             if (remaining < section.items.size) {
-                val items = section.items
-                return if (items is SoftList<T>) {
-                    items.softGet(remaining)
-                } else {
-                    SoftValue.Present(items[remaining])
-                }
+                // Section items may be soft; propagate load state.
+                return section.items.softGet(remaining)
             }
             remaining -= section.items.size
         }

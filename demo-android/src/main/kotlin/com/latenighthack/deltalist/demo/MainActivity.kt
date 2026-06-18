@@ -99,5 +99,14 @@ fun MainScreen() {
         ) {
             Text("Drag & Drop Demo")
         }
+
+        Button(
+            onClick = { context.startActivity(Intent(context, NotificationsActivity::class.java)) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp)
+        ) {
+            Text("Notifications Demo")
+        }
     }
 }

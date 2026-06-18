@@ -1,5 +1,20 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.*
+
+import com.latenighthack.deltalist.get
+import com.latenighthack.deltalist.toList
+import com.latenighthack.deltalist.iterator
+import com.latenighthack.deltalist.isEmpty
+import com.latenighthack.deltalist.isNotEmpty
+import com.latenighthack.deltalist.indices
+import com.latenighthack.deltalist.map
+import com.latenighthack.deltalist.filter
+import com.latenighthack.deltalist.forEach
+import com.latenighthack.deltalist.first
+import com.latenighthack.deltalist.last
+import com.latenighthack.deltalist.contains
+import com.latenighthack.deltalist.AbstractSoftList
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
@@ -294,18 +309,9 @@ class FilterDynamicTest {
         private val loadedItems: List<T>,
         private val estimatedTotal: Int,
         private val onFetchTriggered: () -> Unit = {}
-    ) : AbstractList<T>(), SoftList<T> {
+    ) : AbstractSoftList<T>() {
 
         override val size: Int = maxOf(loadedItems.size, estimatedTotal)
-
-        override fun get(index: Int): T {
-            if (index < 0) throw IndexOutOfBoundsException("Index $index is negative")
-            if (index >= loadedItems.size) {
-                onFetchTriggered()
-                throw IndexOutOfBoundsException("Index $index beyond loaded (${loadedItems.size})")
-            }
-            return loadedItems[index]
-        }
 
         override fun softGet(index: Int): SoftValue<T>? {
             if (index < 0 || index >= size) return null

@@ -1,5 +1,19 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.*
+
+import com.latenighthack.deltalist.get
+import com.latenighthack.deltalist.toList
+import com.latenighthack.deltalist.iterator
+import com.latenighthack.deltalist.isEmpty
+import com.latenighthack.deltalist.isNotEmpty
+import com.latenighthack.deltalist.indices
+import com.latenighthack.deltalist.map
+import com.latenighthack.deltalist.filter
+import com.latenighthack.deltalist.forEach
+import com.latenighthack.deltalist.first
+import com.latenighthack.deltalist.last
+import com.latenighthack.deltalist.contains
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.Mutation
@@ -28,7 +42,7 @@ class FilterTest {
         job.cancel()
 
         assertEquals(1, results.size)
-        assertEquals(listOf(2, 4), results[0].items)
+        assertEquals(listOf(2, 4), results[0].items.toList())
         assertTrue(results[0].change is Change.Reload)
     }
 
@@ -50,7 +64,7 @@ class FilterTest {
 
         assertEquals(2, results.size)
         // Second emission should have the inserted item
-        assertEquals(listOf(2), results[1].items)
+        assertEquals(listOf(2), results[1].items.toList())
         val change = results[1].change as Change.Mutations
         assertEquals(1, change.operations.size)
         val insert = change.operations[0] as Mutation.Insert
@@ -95,7 +109,7 @@ class FilterTest {
         job.cancel()
 
         assertEquals(2, results.size)
-        assertEquals(listOf(4), results[1].items)
+        assertEquals(listOf(4), results[1].items.toList())
         val change = results[1].change as Change.Mutations
         assertEquals(1, change.operations.size)
         val remove = change.operations[0] as Mutation.Remove
@@ -140,7 +154,7 @@ class FilterTest {
         job.cancel()
 
         assertEquals(2, results.size)
-        assertEquals(listOf(6, 4), results[1].items)
+        assertEquals(listOf(6, 4), results[1].items.toList())
         val change = results[1].change as Change.Mutations
         assertEquals(1, change.operations.size)
         val update = change.operations[0] as Mutation.Update
@@ -164,7 +178,7 @@ class FilterTest {
         job.cancel()
 
         assertEquals(2, results.size)
-        assertEquals(listOf(4), results[1].items)
+        assertEquals(listOf(4), results[1].items.toList())
         val change = results[1].change as Change.Mutations
         assertEquals(1, change.operations.size)
         val remove = change.operations[0] as Mutation.Remove
@@ -188,7 +202,7 @@ class FilterTest {
         job.cancel()
 
         assertEquals(2, results.size)
-        assertEquals(listOf(6, 2, 4), results[1].items)
+        assertEquals(listOf(6, 2, 4), results[1].items.toList())
         val change = results[1].change as Change.Mutations
         assertEquals(1, change.operations.size)
         val insert = change.operations[0] as Mutation.Insert
@@ -217,7 +231,7 @@ class FilterTest {
         job.cancel()
 
         assertEquals(2, results.size)
-        assertEquals(listOf(6, 8, 2, 4), results[1].items)
+        assertEquals(listOf(6, 8, 2, 4), results[1].items.toList())
     }
 
     // Move mutation tests

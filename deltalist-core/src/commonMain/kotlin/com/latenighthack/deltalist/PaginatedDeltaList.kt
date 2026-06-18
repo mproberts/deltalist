@@ -62,16 +62,23 @@ internal class PaginatedDeltaListImpl<T, U>(
         Delta(createWrapper(), Change.Reload)
     )
 
+    // Bumped per emitted snapshot. The fetch-trigger closures below capture the generation
+    // they were created in and no-op once superseded, so a stale snapshot's request() can't
+    // drive a fetch (decision A: side effects honored only on the current snapshot).
+    private var generation = 0
+
     private fun createWrapper(): PaginatedListWrapper<T> {
+        generation += 1
+        val myGen = generation
         return PaginatedListWrapper(
             items = _items.toList(),
             estimatedTotalSize = _estimatedTotalSize,
             fetchWindowSize = fetchWindowSize,
             hasMoreBefore = _beforeToken != null,
             hasMoreAfter = _afterToken != null || !_initialLoadDone,
-            onAccessNearStart = { triggerBeforeFetch() },
-            onAccessNearEnd = { triggerAfterFetch() },
-            onAccessWhenEmpty = { triggerInitialFetch() }
+            onAccessNearStart = { if (myGen == generation) triggerBeforeFetch() },
+            onAccessNearEnd = { if (myGen == generation) triggerAfterFetch() },
+            onAccessWhenEmpty = { if (myGen == generation) triggerInitialFetch() }
         )
     }
 
@@ -183,52 +190,78 @@ internal class PaginatedDeltaListImpl<T, U>(
         }
     }
 
-    private fun emitChange(count: Int, isAppend: Boolean, isInitial: Boolean, previousRealSize: Int = 0) {
-        if (count == 0 && !isInitial) return
+    // The display size and leading-placeholder count the last emitted Delta reported.
+    private var _lastDisplaySize = 0
+    private var _lastLeading = 0
 
+    private fun emitChange(count: Int, isAppend: Boolean, isInitial: Boolean, previousRealSize: Int = 0) {
         val currentList = createWrapper()
+        val newDisplaySize = currentList.size
+        val leadingNow = if (_beforeToken != null) 1 else 0
 
         if (isInitial) {
+            _lastDisplaySize = newDisplaySize
+            _lastLeading = leadingNow
             state.value = Delta(currentList, Change.Reload)
+            return
+        }
+
+        // Nothing changed structurally (e.g. an empty page that didn't toggle a placeholder).
+        if (count == 0 && newDisplaySize == _lastDisplaySize && leadingNow == _lastLeading) return
+
+        val oldDisplaySize = _lastDisplaySize
+        val mutations = mutableListOf<Mutation>()
+        var working = oldDisplaySize
+
+        if (isAppend) {
+            // New items land just after the leading placeholder + previously-loaded items.
+            val insertIndex = leadingNow + previousRealSize
+            val coveredEnd = minOf(insertIndex + count, oldDisplaySize)
+            val coveredCount = (coveredEnd - insertIndex).coerceAtLeast(0)
+            if (coveredCount > 0) {
+                mutations.add(Mutation.Update(insertIndex, coveredCount))
+            }
+            val insertedBeyond = count - coveredCount
+            if (insertedBeyond > 0) {
+                mutations.add(Mutation.Insert(oldDisplaySize, insertedBeyond))
+                working += insertedBeyond
+            }
         } else {
-            val estimated = _estimatedTotalSize
-
-            if (isAppend) {
-                val insertIndex = previousRealSize
-                val coveredByEstimate = if (estimated != null) {
-                    previousRealSize < estimated
-                } else {
-                    false
+            // Before-fetch: prepend `count` real items, accounting for the leading
+            // placeholder transition (it persists if earlier pages still remain, otherwise
+            // the first new item fills the old placeholder slot).
+            val l0 = _lastLeading
+            val l1 = leadingNow
+            when {
+                l0 == 1 && l1 == 1 -> if (count > 0) {
+                    mutations.add(Mutation.Insert(1, count)); working += count
                 }
-
-                if (coveredByEstimate && estimated != null) {
-                    val coveredCount = minOf(count, estimated - previousRealSize)
-                    val uncoveredCount = count - coveredCount
-
-                    val mutations = mutableListOf<Mutation>()
-
-                    if (coveredCount > 0) {
-                        mutations.add(Mutation.Update(insertIndex, coveredCount))
-                    }
-
-                    if (uncoveredCount > 0) {
-                        mutations.add(Mutation.Insert(insertIndex + coveredCount, uncoveredCount))
-                    }
-
-                    state.value = Delta(currentList, Change.Mutations(mutations))
+                l0 == 1 && l1 == 0 -> if (count >= 1) {
+                    mutations.add(Mutation.Update(0, 1))
+                    if (count > 1) mutations.add(Mutation.Insert(1, count - 1))
+                    working += count - 1
                 } else {
-                    state.value = Delta(
-                        currentList,
-                        Change.Mutations(Mutation.Insert(insertIndex, count))
-                    )
+                    mutations.add(Mutation.Remove(0, 1)); working -= 1
                 }
-            } else {
-                state.value = Delta(
-                    currentList,
-                    Change.Mutations(Mutation.Insert(0, count))
-                )
+                else -> {
+                    if (count > 0) { mutations.add(Mutation.Insert(0, count)); working += count }
+                    if (l1 == 1) { mutations.add(Mutation.Insert(0, 1)); working += 1 }
+                }
             }
         }
+
+        // Reconcile remaining placeholder delta at the trailing end: shrink removes phantoms
+        // a short last page revealed; growth adds placeholders from a larger estimate.
+        if (working > newDisplaySize) {
+            mutations.add(Mutation.Remove(newDisplaySize, working - newDisplaySize))
+        } else if (working < newDisplaySize) {
+            mutations.add(Mutation.Insert(working, newDisplaySize - working))
+        }
+
+        _lastDisplaySize = newDisplaySize
+        _lastLeading = leadingNow
+        if (mutations.isEmpty()) return
+        state.value = Delta(currentList, Change.Mutations(mutations))
     }
 
     override suspend fun collect(collector: kotlinx.coroutines.flow.FlowCollector<Delta<T>>) {
@@ -253,81 +286,47 @@ internal class PaginatedListWrapper<T>(
     private val onAccessNearStart: () -> Unit,
     private val onAccessNearEnd: () -> Unit,
     private val onAccessWhenEmpty: () -> Unit
-) : AbstractList<T>(), SoftList<T> {
+) : AbstractSoftList<T>() {
 
-    override val size: Int
+    // A single leading placeholder when earlier pages remain, so the UI has a "load
+    // earlier" NotLoaded slot at the top whose request() drives the before-fetch
+    // (symmetric with the trailing placeholder).
+    private val leading: Int get() = if (hasMoreBefore) 1 else 0
+
+    private val trailing: Int
         get() {
             val realSize = items.size
             val estimated = estimatedTotalSize
-            return if (estimated != null && estimated > realSize) {
-                estimated
-            } else {
-                realSize
+            return when {
+                // While more remains, inflate to the estimate if it's larger...
+                hasMoreAfter && estimated != null && estimated > realSize -> estimated - realSize
+                // ...otherwise a single trailing placeholder so the UI always has a NotLoaded
+                // slot whose request() drives the next fetch (no more throw-to-fetch). Once
+                // exhausted, no trailing placeholder.
+                hasMoreAfter -> 1
+                else -> 0
             }
         }
 
-    override fun get(index: Int): T {
-        val realSize = items.size
-
-        // Trigger fetch if empty and we might have data
-        if (realSize == 0 && hasMoreAfter) {
-            onAccessWhenEmpty()
-            throw IndexOutOfBoundsException("List is empty, fetch triggered. Index: $index")
-        }
-
-        // Check if accessing near the start (within fetch window)
-        if (hasMoreBefore && index < fetchWindowSize) {
-            onAccessNearStart()
-        }
-
-        // Check if accessing near the end of loaded items (within fetch window)
-        if (hasMoreAfter && index >= realSize - fetchWindowSize) {
-            onAccessNearEnd()
-        }
-
-        // For indices beyond loaded items, throw
-        if (index >= realSize) {
-            throw IndexOutOfBoundsException("Index $index is beyond loaded items (loaded: $realSize)")
-        }
-
-        if (index < 0) {
-            throw IndexOutOfBoundsException("Index $index is negative")
-        }
-
-        return items[index]
-    }
+    override val size: Int get() = leading + items.size + trailing
 
     override fun softGet(index: Int): SoftValue<T>? {
-        val realSize = items.size
-        val effectiveSize = estimatedTotalSize?.let { maxOf(it, realSize) } ?: realSize
+        // Pure peek (no fetch side effects). Bounds use the gated [size]. The trigger
+        // closures are epoch-guarded by the producer, so a superseded snapshot's request()
+        // is a safe no-op.
+        if (index < 0 || index >= size) return null
 
-        // Out of bounds
-        if (index < 0 || index >= effectiveSize) return null
-
-        // Within bounds but not yet loaded
-        if (index >= realSize) {
-            return SoftValue.NotLoaded {
-                // Trigger the appropriate fetch based on available data
-                if (hasMoreAfter) {
-                    onAccessNearEnd()
-                }
-            }
+        if (index < leading) {
+            // Leading "load earlier" placeholder.
+            return SoftValue.NotLoaded { if (hasMoreBefore) onAccessNearStart() }
         }
 
-        // Loaded
-        return SoftValue.Present(items[index])
-    }
+        val realIndex = index - leading
+        if (realIndex < items.size) {
+            return SoftValue.Present(items[realIndex])
+        }
 
-    // Override equals/hashCode to avoid triggering fetches during StateFlow comparison
-    override fun equals(other: Any?): Boolean {
-        if (other === this) return true
-        if (other !is PaginatedListWrapper<*>) return false
-        return items == other.items && estimatedTotalSize == other.estimatedTotalSize
-    }
-
-    override fun hashCode(): Int {
-        var result = items.hashCode()
-        result = 31 * result + (estimatedTotalSize ?: 0)
-        return result
+        // Trailing "load more" placeholder.
+        return SoftValue.NotLoaded { if (hasMoreAfter) onAccessNearEnd() }
     }
 }

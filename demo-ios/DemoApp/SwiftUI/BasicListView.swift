@@ -8,8 +8,8 @@ struct BasicListView: View {
     // Use Kotlin ViewModel directly - no adapter needed!
     private let viewModel = ListViewModel()
 
-    // Simple observer using DeltaListCore patterns
-    @StateObject private var tickingItemsObserver = TickingItemsObserver()
+    // Consolidated DeltaListCore wrapper; collection is driven by `.task` below.
+    @StateObject private var list = DeltaListCore.DeltaList<DemoCore.StableItem>()
 
     @State private var selectedTab = 0
     @State private var selectedId: String? = nil
@@ -28,62 +28,21 @@ struct BasicListView: View {
             if selectedTab == 0 {
                 BasicListSwiftUIContent(
                     viewModel: viewModel,
-                    items: tickingItemsObserver.items,
+                    items: list.loadedItems,
                     selectedId: $selectedId
                 )
             } else {
                 BasicListUIKitContent(
                     viewModel: viewModel,
-                    items: tickingItemsObserver.items
+                    items: list.loadedItems
                 )
             }
         }
         .navigationTitle("Basic List")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear {
-            tickingItemsObserver.bind(to: viewModel.tickingItems)
+        .task {
+            await list.collect(viewModel.tickingItems)
         }
-        .onDisappear {
-            tickingItemsObserver.unbind()
-        }
-    }
-}
-
-// MARK: - Ticking Items Observer
-
-/// Simple observer for the list items.
-/// This is a minimal wrapper that handles flow collection using DeltaListCore patterns.
-@MainActor
-class TickingItemsObserver: ObservableObject {
-    @Published private(set) var items: [DemoCore.StableItem] = []
-
-    private var task: Task<Void, Never>?
-
-    func bind(to flow: some AsyncSequence) {
-        unbind()
-        task = Task { @MainActor [weak self] in
-            do {
-                for try await delta in flow {
-                    if Task.isCancelled { break }
-                    guard let self = self else { break }
-                    // Delta<StableItem<TickingItem>> - extract items using runtime casting
-                    if let d = delta as? DemoCore.Delta<DemoCore.StableItem> {
-                        self.items = d.items.compactMap { $0 as? DemoCore.StableItem }
-                    } else if let d = delta as? DeltaListCore.Delta<AnyObject> {
-                        self.items = d.items.compactMap { $0 as? DemoCore.StableItem }
-                    }
-                }
-            } catch {}
-        }
-    }
-
-    func unbind() {
-        task?.cancel()
-        task = nil
-    }
-
-    deinit {
-        task?.cancel()
     }
 }
 

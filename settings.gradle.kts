@@ -30,6 +30,7 @@ rootProject.name = "deltalist"
 include(":deltalist-core")
 include(":deltalist-android-recyclerview")
 include(":deltalist-android-compose")
+include(":deltalist-android-notifications")
 include(":deltalist-react")
 include(":demo-core")
 include(":demo-android")

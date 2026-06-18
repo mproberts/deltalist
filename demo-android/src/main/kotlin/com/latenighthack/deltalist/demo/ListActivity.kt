@@ -40,7 +40,9 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.latenighthack.deltalist.DeltaList
 import com.latenighthack.deltalist.LazyList
+import com.latenighthack.deltalist.SoftList
 import com.latenighthack.deltalist.StableItem
+import com.latenighthack.deltalist.softLoadedItems
 import com.latenighthack.deltalist.android.compose.collectAsDeltaState
 import com.latenighthack.deltalist.android.compose.rememberItemState
 import com.latenighthack.deltalist.android.recyclerview.FlowDeltaAdapter
@@ -96,12 +98,12 @@ private fun ListComposeContent(viewModel: ListViewModel) {
     var selectedId by remember { mutableStateOf<String?>(null) }
     val delta = viewModel.tickingItems.collectAsDeltaState()
     val originalDelta = viewModel.items.collectAsDeltaState()
-    val selectedIndex = originalDelta.items.indexOfFirst { it.id == selectedId }
+    val selectedIndex = originalDelta.items.softLoadedItems().indexOfFirst { it.id == selectedId }
 
     Column(modifier = Modifier.fillMaxSize()) {
         LazyColumn(modifier = Modifier.weight(1f)) {
             items(
-                items = delta.items,
+                items = delta.items.softLoadedItems(),
                 key = { stableItem -> stableItem.stableId }
             ) { stableItem ->
                 // Clean API: stableItem.value gives us the TickingItem directly
@@ -139,7 +141,7 @@ private fun ListComposeContent(viewModel: ListViewModel) {
 
 @Composable
 private fun LazyTickingItemCard(
-    items: List<StableItem<TickingItem>>,
+    items: SoftList<StableItem<TickingItem>>,
     stableItem: StableItem<TickingItem>,
     isSelected: (String) -> Boolean,
     onClick: (String) -> Unit
@@ -151,7 +153,7 @@ private fun LazyTickingItemCard(
     // Handle release when item leaves composition
     // The LazyList will release the cached transformation
     if (items is LazyList<*>) {
-        val index = items.indexOf(stableItem)
+        val index = items.softLoadedItems().indexOf(stableItem)
         DisposableEffect(stableId) {
             onDispose {
                 tickingItem.stop()

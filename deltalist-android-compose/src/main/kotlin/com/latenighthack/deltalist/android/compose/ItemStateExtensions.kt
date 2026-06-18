@@ -6,8 +6,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import com.latenighthack.deltalist.LazyList
+import com.latenighthack.deltalist.SoftList
+import com.latenighthack.deltalist.SoftValue
+import com.latenighthack.deltalist.acquireOrGet
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collectLatest
 
@@ -132,17 +136,28 @@ fun <T, S : Any> rememberItemStateOrNull(
  * @return The current state value, updated as the flow emits
  */
 @Composable
-fun <T, S> List<T>.rememberLazyItemState(
+fun <T, S> SoftList<T>.rememberLazyItemState(
     index: Int,
     key: Any,
     initialValue: S,
     flowAccessor: (T) -> Flow<S>
 ): S {
-    val item = remember(key) { this[index] }
+    val list = this
+    val item = remember(key) {
+        when (val v = list.acquireOrGet(index)) {
+            is SoftValue.Present -> v.value
+            is SoftValue.NotLoaded -> throw IndexOutOfBoundsException("Item at $index is not loaded")
+        }
+    }
 
-    if (this is LazyList<T>) {
+    if (list is LazyList<*>) {
+        @Suppress("UNCHECKED_CAST")
+        val lazy = list as LazyList<T>
+        // Release the item's current index, not the position captured at first composition,
+        // so a move-while-composed (same key, new index) releases the right slot.
+        val currentIndex = rememberUpdatedState(index)
         DisposableEffect(key) {
-            onDispose { release(index) }
+            onDispose { lazy.release(currentIndex.value) }
         }
     }
 
@@ -158,7 +173,7 @@ fun <T, S> List<T>.rememberLazyItemState(
  * @return The current state value, or null before first emission
  */
 @Composable
-fun <T, S : Any> List<T>.rememberLazyItemStateOrNull(
+fun <T, S : Any> SoftList<T>.rememberLazyItemStateOrNull(
     index: Int,
     key: Any,
     flowAccessor: (T) -> Flow<S>

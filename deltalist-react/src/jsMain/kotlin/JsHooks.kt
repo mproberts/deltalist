@@ -1,6 +1,7 @@
 // No package - exports at module root for clean JS imports
 
 import com.latenighthack.deltalist.Delta
+import com.latenighthack.deltalist.SoftList
 import com.latenighthack.deltalist.SoftValue
 import com.latenighthack.deltalist.softGetOrNull
 import com.latenighthack.deltalist.softLoadedCount
@@ -27,7 +28,7 @@ private external object ReactLib {
  * because they read `length` and indexed properties through the
  * proxy get trap, then fall back to Array.prototype for methods.
  */
-private fun createItemsProxy(items: List<Any?>): dynamic {
+private fun createItemsProxy(items: SoftList<Any?>): dynamic {
     val loadedCount = items.softLoadedCount()
 
     val handler: dynamic = js("({})")
@@ -65,6 +66,11 @@ fun useDeltaList(deltaList: Any): Any {
     val setItems = state[1]
 
     ReactLib.useEffect({
+        // scope.cancel() is cooperative, so a collector can deliver one more emission after
+        // cleanup runs. On a rapid prop change the previous and next collectors would both
+        // call setItems, causing a flicker. This flag (flipped synchronously in cleanup on
+        // JS's single thread) gates any stale emission from the cancelled collector.
+        var active = true
         val scope = CoroutineScope(SupervisorJob())
 
         @Suppress("UNCHECKED_CAST")
@@ -72,11 +78,14 @@ fun useDeltaList(deltaList: Any): Any {
 
         scope.launch {
             flow.collect { delta ->
-                setItems(createItemsProxy(delta.items))
+                if (active) setItems(createItemsProxy(delta.items))
             }
         }
 
-        val cleanup: () -> Unit = { scope.cancel() }
+        val cleanup: () -> Unit = {
+            active = false
+            scope.cancel()
+        }
         cleanup
     }, arrayOf(deltaList))
 
@@ -90,6 +99,8 @@ fun useFlow(flow: Any, initial: Any? = null): Any? {
     val setValue = state[1]
 
     ReactLib.useEffect({
+        // See useDeltaList: gate stale emissions from a cooperatively-cancelled collector.
+        var active = true
         val scope = CoroutineScope(SupervisorJob())
 
         @Suppress("UNCHECKED_CAST")
@@ -97,11 +108,14 @@ fun useFlow(flow: Any, initial: Any? = null): Any? {
 
         scope.launch {
             kotlinFlow.collect { value ->
-                setValue(value)
+                if (active) setValue(value)
             }
         }
 
-        val cleanup: () -> Unit = { scope.cancel() }
+        val cleanup: () -> Unit = {
+            active = false
+            scope.cancel()
+        }
         cleanup
     }, arrayOf(flow))
 

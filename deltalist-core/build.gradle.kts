@@ -25,6 +25,8 @@ kotlin {
 
     js(IR) {
         browser()
+        // nodejs enables headless execution of commonTest on the JS target in CI.
+        nodejs()
     }
 
     val xcf = XCFramework("DeltaListCore")

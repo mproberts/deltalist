@@ -14,6 +14,7 @@
 		001A00031 /* PaginatedListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 001B00031 /* PaginatedListView.swift */; };
 		001A00032 /* SectionedListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 001B00032 /* SectionedListView.swift */; };
 		001A00033 /* DragDropView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 001B00033 /* DragDropView.swift */; };
+		001A00034 /* NotificationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 001B00034 /* NotificationsView.swift */; };
 		001A00040 /* BasicListViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 001B00040 /* BasicListViewController.swift */; };
 		001A00041 /* PaginatedListViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 001B00041 /* PaginatedListViewController.swift */; };
 		001A00042 /* SectionedListViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 001B00042 /* SectionedListViewController.swift */; };
@@ -32,6 +33,7 @@
 		001B00031 /* PaginatedListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaginatedListView.swift; sourceTree = "<group>"; };
 		001B00032 /* SectionedListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SectionedListView.swift; sourceTree = "<group>"; };
 		001B00033 /* DragDropView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DragDropView.swift; sourceTree = "<group>"; };
+		001B00034 /* NotificationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationsView.swift; sourceTree = "<group>"; };
 		001B00040 /* BasicListViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BasicListViewController.swift; sourceTree = "<group>"; };
 		001B00041 /* PaginatedListViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaginatedListViewController.swift; sourceTree = "<group>"; };
 		001B00042 /* SectionedListViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SectionedListViewController.swift; sourceTree = "<group>"; };
@@ -82,6 +84,7 @@
 				001B00031 /* PaginatedListView.swift */,
 				001B00032 /* SectionedListView.swift */,
 				001B00033 /* DragDropView.swift */,
+				001B00034 /* NotificationsView.swift */,
 			);
 			path = SwiftUI;
 			sourceTree = "<group>";
@@ -199,6 +202,7 @@
 				001A00031 /* PaginatedListView.swift in Sources */,
 				001A00032 /* SectionedListView.swift in Sources */,
 				001A00033 /* DragDropView.swift in Sources */,
+				001A00034 /* NotificationsView.swift in Sources */,
 				001A00040 /* BasicListViewController.swift in Sources */,
 				001A00041 /* PaginatedListViewController.swift in Sources */,
 				001A00042 /* SectionedListViewController.swift in Sources */,

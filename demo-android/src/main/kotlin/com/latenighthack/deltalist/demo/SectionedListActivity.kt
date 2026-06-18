@@ -38,6 +38,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.latenighthack.deltalist.DeltaList
+import com.latenighthack.deltalist.softLoadedItems
 import com.latenighthack.deltalist.android.compose.collectAsDeltaState
 import com.latenighthack.deltalist.android.recyclerview.DeltaAdapter
 import com.latenighthack.deltalist.demo.ui.theme.DeltaListDemoTheme
@@ -94,8 +95,9 @@ private fun SectionedComposeContent(viewModel: SectionedListViewModel) {
 
     Column(modifier = Modifier.fillMaxSize()) {
         LazyColumn(modifier = Modifier.weight(1f)) {
+            val rows = delta.items.softLoadedItems()
             items(
-                items = delta.items,
+                items = rows,
                 key = { row ->
                     when (row) {
                         is SectionRow.Header -> "header-${row.header.title}"
@@ -105,7 +107,7 @@ private fun SectionedComposeContent(viewModel: SectionedListViewModel) {
             ) { row ->
                 when (row) {
                     is SectionRow.Header -> {
-                        val sectionIndex = delta.items.take(delta.items.indexOf(row) + 1)
+                        val sectionIndex = rows.take(rows.indexOf(row) + 1)
                             .count { it is SectionRow.Header } - 1
                         SectionHeaderCard(
                             header = row.header,
@@ -117,11 +119,11 @@ private fun SectionedComposeContent(viewModel: SectionedListViewModel) {
                         )
                     }
                     is SectionRow.ItemRow -> {
-                        val itemIdx = delta.items.indexOf(row)
+                        val itemIdx = rows.indexOf(row)
                         var sectionIdx = -1
                         var itemInSectionIdx = -1
                         var count = 0
-                        for ((i, r) in delta.items.withIndex()) {
+                        for ((i, r) in rows.withIndex()) {
                             if (r is SectionRow.Header) {
                                 sectionIdx++
                                 count = 0
@@ -350,7 +352,7 @@ private class SectionedAdapter(
     var selectedSectionIndex: Int = -1
         set(value) {
             field = value
-            items.forEachIndexed { index, row ->
+            items.softLoadedItems().forEachIndexed { index, row ->
                 if (row is SectionRow.Header) {
                     notifyItemChanged(index)
                 }
@@ -405,7 +407,7 @@ private class SectionedAdapter(
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         when (val row = getItem(position)) {
             is SectionRow.Header -> {
-                val sectionIndex = items.take(position + 1).count { it is SectionRow.Header } - 1
+                val sectionIndex = items.softLoadedItems().take(position + 1).count { it is SectionRow.Header } - 1
                 (holder as HeaderViewHolder).bind(row.header, sectionIndex == selectedSectionIndex) {
                     onSectionClick(sectionIndex)
                 }

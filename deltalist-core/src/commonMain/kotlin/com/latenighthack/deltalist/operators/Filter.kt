@@ -1,15 +1,20 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.AbstractSoftList
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
 import com.latenighthack.deltalist.Mutation
 import com.latenighthack.deltalist.SoftList
 import com.latenighthack.deltalist.SoftValue
+import com.latenighthack.deltalist.asSoftList
+import com.latenighthack.deltalist.softGetOrNull
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.map
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 /**
  * Lazy filtered list that only accesses source items when get() is called.
@@ -27,104 +32,62 @@ import kotlinx.coroutines.flow.map
  *        Used by the filter operator to track pending accesses and cascade fetches.
  */
 internal class FilteredList<T>(
-    private val source: List<T>,
+    private val source: SoftList<T>,
     private val filteredIndices: List<Int>,
     private val sourceLoadedCount: Int,
     private val onUnloadedAccess: ((Int) -> Unit)? = null
-) : AbstractList<T>(), SoftList<T> {
+) : AbstractSoftList<T>() {
 
-    // Estimate total filtered size based on current filter ratio
+    /** True when the source still has unloaded pages (so the filtered list isn't final). */
+    private val sourceNotExhausted: Boolean
+        get() = source.size > sourceLoadedCount
+
+    // Estimate total filtered size based on current filter ratio.
     private val estimatedFilteredSize: Int
         get() {
-            val sourceEstimatedSize = source.size // This returns estimated size for SoftList
-            if (sourceEstimatedSize <= sourceLoadedCount) {
-                // No more data expected
+            if (!sourceNotExhausted) {
+                // Source fully loaded: the filtered size is exact.
                 return filteredIndices.size
             }
+            // Source has more pages. Always keep at least one placeholder beyond the known
+            // matches so that a page matching few (or zero) items still renders a NotLoaded
+            // row whose access cascades the next fetch. Without this, a first page that
+            // matches nothing collapses size to 0 and pagination stalls forever even though
+            // matches exist downstream.
+            val minWithPlaceholder = filteredIndices.size + 1
             if (sourceLoadedCount == 0) {
-                // No data yet, can't estimate ratio
-                return 0
+                // No ratio yet; surface a single placeholder to kick off loading.
+                return minWithPlaceholder
             }
-            // Calculate filter ratio from loaded items and extrapolate
             val filterRatio = filteredIndices.size.toDouble() / sourceLoadedCount
-            return (sourceEstimatedSize * filterRatio).toInt()
+            val extrapolated = (source.size * filterRatio).toInt()
+            return maxOf(minWithPlaceholder, extrapolated)
         }
 
     override val size: Int
         get() = maxOf(filteredIndices.size, estimatedFilteredSize)
-
-    override fun get(index: Int): T {
-        if (index < 0) {
-            throw IndexOutOfBoundsException("Index $index is negative")
-        }
-
-        if (index < filteredIndices.size) {
-            // Within loaded filtered items
-            return source[filteredIndices[index]]
-        }
-
-        // Beyond loaded filtered items - notify and trigger fetch
-        onUnloadedAccess?.invoke(index)
-
-        if (source is SoftList<*>) {
-            // Access the first unloaded item to trigger a fetch
-            // This will cause the SoftList to request more data
-            try {
-                source[sourceLoadedCount]
-            } catch (_: IndexOutOfBoundsException) {
-                // Ignore - source might have changed or be fully loaded
-            }
-        }
-
-        throw IndexOutOfBoundsException(
-            "Filtered index $index is beyond loaded items (loaded: ${filteredIndices.size}, estimated: $size)"
-        )
-    }
 
     override fun softGet(index: Int): SoftValue<T>? {
         if (index < 0) return null
 
         if (index < filteredIndices.size) {
             // Within loaded filtered items
-            val sourceIndex = filteredIndices[index]
-            return if (source is SoftList<T>) {
-                source.softGet(sourceIndex)
-            } else {
-                SoftValue.Present(source[sourceIndex])
-            }
+            return source.softGet(filteredIndices[index])
         }
 
-        // Beyond loaded but within estimated size
+        // Beyond loaded but within estimated size: a placeholder whose request() records
+        // the pending access and cascades a fetch on the source. (Pure peek otherwise.)
         if (index < size) {
-            // Proxy to the source's NotLoaded to get its fetch callback
-            if (source is SoftList<*>) {
-                val sourceSoftValue = source.softGet(sourceLoadedCount)
-                if (sourceSoftValue is SoftValue.NotLoaded) {
-                    return sourceSoftValue
-                }
+            val onAccess = onUnloadedAccess
+            val sourceSoftValue = source.softGet(sourceLoadedCount)
+            return SoftValue.NotLoaded {
+                onAccess?.invoke(index)
+                (sourceSoftValue as? SoftValue.NotLoaded)?.request()
             }
-            return SoftValue.NotLoaded()
         }
 
         // Out of bounds
         return null
-    }
-
-    // Override equals/hashCode to avoid iterating through unloaded items
-    // during StateFlow/Compose equality comparisons
-    override fun equals(other: Any?): Boolean {
-        if (other === this) return true
-        if (other !is FilteredList<*>) return false
-        return filteredIndices == other.filteredIndices &&
-                sourceLoadedCount == other.sourceLoadedCount &&
-                source == other.source
-    }
-
-    override fun hashCode(): Int {
-        var result = filteredIndices.hashCode()
-        result = 31 * result + sourceLoadedCount
-        result = 31 * result + source.hashCode()
-        return result
     }
 }
 
@@ -227,7 +190,7 @@ private fun adjustMutationsForPlaceholders(
 fun <T> DeltaList<T>.filterItems(predicate: (T) -> Boolean): DeltaList<T> = flow {
     var previousFilteredIndices: Set<Int> = emptySet()
     var previousFilteredSize: Int = 0
-    var previousSourceItems: List<T> = emptyList()
+    var previousSourceItems: SoftList<T> = emptyList<T>().asSoftList()
 
     collect { delta ->
         val sourceItems = delta.items
@@ -242,7 +205,7 @@ fun <T> DeltaList<T>.filterItems(predicate: (T) -> Boolean): DeltaList<T> = flow
         val prevLoadedCount = previousFilteredIndices.size
 
         // If previousSourceItems is empty, we can't translate mutations - treat as Reload
-        val change = if (previousSourceItems.isEmpty() && delta.change !is Change.Reload) {
+        val change = if (previousSourceItems.size == 0 && delta.change !is Change.Reload) {
             Change.Reload
         } else {
             when (delta.change) {
@@ -314,10 +277,11 @@ private sealed class FilterEvent<out T> {
  * @param predicateFlow A [Flow] that emits predicate functions. Each emission
  *        triggers a re-filter of the current items.
  */
+@OptIn(ExperimentalAtomicApi::class)
 fun <T> DeltaList<T>.filterItemsDynamic(
     predicateFlow: kotlinx.coroutines.flow.Flow<(T) -> Boolean>
 ): DeltaList<T> = flow {
-    var currentSourceItems: List<T> = emptyList()
+    var currentSourceItems: SoftList<T> = emptyList<T>().asSoftList()
     var currentSourceLoadedCount: Int = 0
     var previousFilteredIndices: Set<Int> = emptySet()
     var previousFilteredSize: Int = 0 // Track estimated size for placeholder handling
@@ -327,37 +291,50 @@ fun <T> DeltaList<T>.filterItemsDynamic(
     // Track filtered indices that have been accessed but not yet loaded.
     // This enables cascading fetches: when the UI accesses an unloaded filtered item,
     // we keep fetching from the source until that item is satisfied.
-    val pendingAccessIndices = mutableSetOf<Int>()
+    //
+    // Accessed from two contexts with no happens-before relation: the collector coroutine
+    // (cascade/predicate handling) and FilteredList.get() (any thread, e.g. the UI thread
+    // during a layout pass). Hold it in an atomic and mutate via CAS so updates can't be
+    // lost to a data race.
+    val pendingAccessIndices = AtomicReference<Set<Int>>(emptySet())
+
+    fun addPendingAccess(index: Int) {
+        while (true) {
+            val current = pendingAccessIndices.load()
+            if (index in current) return
+            if (pendingAccessIndices.compareAndExchange(current, current + index) === current) return
+        }
+    }
+
+    fun setPendingAccess(value: Set<Int>) {
+        pendingAccessIndices.store(value)
+    }
 
     // Callback for FilteredList to notify when unloaded items are accessed
     val onUnloadedAccess: (Int) -> Unit = { index ->
-        pendingAccessIndices.add(index)
+        addPendingAccess(index)
     }
 
     // Helper to create FilteredList with access tracking
-    fun createFilteredList(source: List<T>, indices: List<Int>, loadedCount: Int): FilteredList<T> {
+    fun createFilteredList(source: SoftList<T>, indices: List<Int>, loadedCount: Int): FilteredList<T> {
         return FilteredList(source, indices, loadedCount, onUnloadedAccess)
     }
 
     // Cascade fetches: after emitting a delta, check if pending accesses are still
     // NotLoaded and trigger another fetch if needed
-    fun cascadeFetchesIfNeeded(filteredList: FilteredList<T>, source: List<T>, sourceLoadedCount: Int) {
+    fun cascadeFetchesIfNeeded(filteredList: FilteredList<T>, source: SoftList<T>, sourceLoadedCount: Int) {
         // Find indices that are still not loaded
-        val stillPending = pendingAccessIndices.filter { index ->
+        val stillPending = pendingAccessIndices.load().filter { index ->
             index < filteredList.size && filteredList.softGet(index) is SoftValue.NotLoaded
         }
 
         // Update pending set
-        pendingAccessIndices.clear()
-        pendingAccessIndices.addAll(stillPending)
+        setPendingAccess(stillPending.toSet())
 
-        // If there are still pending accesses and source has more data, trigger fetch
-        if (stillPending.isNotEmpty() && source is SoftList<*> && sourceLoadedCount < source.size) {
-            try {
-                source[sourceLoadedCount]
-            } catch (_: IndexOutOfBoundsException) {
-                // Source exhausted
-            }
+        // If there are still pending accesses and the source has more data, request the next
+        // unloaded source item (its placeholder's request() drives the fetch).
+        if (stillPending.isNotEmpty() && sourceLoadedCount < source.size) {
+            (source.softGet(sourceLoadedCount) as? SoftValue.NotLoaded)?.request()
         }
     }
 
@@ -373,7 +350,7 @@ fun <T> DeltaList<T>.filterItemsDynamic(
                 currentPredicate = event.predicate
 
                 // Clear pending accesses on predicate change - they're no longer valid
-                pendingAccessIndices.clear()
+                setPendingAccess(emptySet())
 
                 // Check if we have a pending delta that arrived before the predicate
                 val deltaToProcess = pendingDelta
@@ -394,7 +371,7 @@ fun <T> DeltaList<T>.filterItemsDynamic(
                     previousFilteredSize = filteredList.size
                     emit(Delta(filteredList, Change.Reload))
                     cascadeFetchesIfNeeded(filteredList, sourceItems, loadedCount)
-                } else if (currentSourceItems.isNotEmpty()) {
+                } else if (currentSourceItems.size > 0) {
                     // Predicate changed - re-filter current items and emit Reload
                     val (filteredIndices, loadedCount) = buildFilteredIndices(currentSourceItems, event.predicate)
                     val filteredIndicesList = filteredIndices.sorted()
@@ -497,34 +474,24 @@ private data class FilteredIndicesResult(
  *
  * @return A pair of (filtered indices, loaded item count)
  */
-private fun <T> buildFilteredIndices(source: List<T>, predicate: (T) -> Boolean): FilteredIndicesResult {
+private fun <T> buildFilteredIndices(source: SoftList<T>, predicate: (T) -> Boolean): FilteredIndicesResult {
     val result = mutableSetOf<Int>()
     var loadedCount = 0
 
-    if (source is SoftList<T>) {
-        // Use soft access to avoid triggering pagination fetches
-        for (i in source.indices) {
-            when (val soft = source.softGet(i)) {
-                is SoftValue.Present -> {
-                    loadedCount++
-                    if (predicate(soft.value)) {
-                        result.add(i)
-                    }
-                }
-                is SoftValue.NotLoaded -> {
-                    // Skip unloaded items - they'll be included when loaded
-                }
-                null -> {
-                    // Out of bounds, skip
+    // Use soft access to avoid triggering pagination fetches.
+    for (i in 0 until source.size) {
+        when (val soft = source.softGet(i)) {
+            is SoftValue.Present -> {
+                loadedCount++
+                if (predicate(soft.value)) {
+                    result.add(i)
                 }
             }
-        }
-    } else {
-        // Regular list - access items directly, all items are "loaded"
-        loadedCount = source.size
-        for (i in source.indices) {
-            if (predicate(source[i])) {
-                result.add(i)
+            is SoftValue.NotLoaded -> {
+                // Skip unloaded items - they'll be included when loaded
+            }
+            null -> {
+                // Out of bounds, skip
             }
         }
     }
@@ -537,29 +504,23 @@ private fun <T> buildFilteredIndices(source: List<T>, predicate: (T) -> Boolean)
  * Returns null if the item is not loaded (for SoftList) or out of bounds.
  */
 private fun <T> checkPredicateSoft(
-    source: List<T>,
+    source: SoftList<T>,
     index: Int,
     predicate: (T) -> Boolean
 ): Boolean? {
     if (index < 0) return null
-
-    return if (source is SoftList<T>) {
-        when (val soft = source.softGet(index)) {
-            is SoftValue.Present -> predicate(soft.value)
-            is SoftValue.NotLoaded -> null // Not loaded, can't determine
-            null -> null // Out of bounds
-        }
-    } else {
-        if (index >= source.size) null
-        else predicate(source[index])
+    return when (val soft = source.softGet(index)) {
+        is SoftValue.Present -> predicate(soft.value)
+        is SoftValue.NotLoaded -> null // Not loaded, can't determine
+        null -> null // Out of bounds
     }
 }
 
 private fun <T> translateMutations(
     mutations: List<Mutation>,
-    previousSourceItems: List<T>,
+    previousSourceItems: SoftList<T>,
     previousFilteredIndices: Set<Int>,
-    currentSourceItems: List<T>,
+    currentSourceItems: SoftList<T>,
     currentFilteredIndices: Set<Int>,
     predicate: (T) -> Boolean
 ): List<Mutation> {
@@ -671,12 +632,10 @@ private fun <T> translateMutations(
                         if (idx > mutation.fromIndex) idx - 1 else idx
                     }.toMutableSet()
 
-                    // Adjust indices for the insertion
-                    val adjustedToIndex = if (mutation.toIndex > mutation.fromIndex) {
-                        mutation.toIndex - 1
-                    } else {
-                        mutation.toIndex
-                    }
+                    // Move's toIndex is already a post-removal running coordinate (the applier
+                    // does removeAt(from) then add(to)), so it indexes the working source space
+                    // directly — no off-by-one adjustment.
+                    val adjustedToIndex = mutation.toIndex
 
                     workingFilteredIndices = workingFilteredIndices.map { idx ->
                         if (idx >= adjustedToIndex) idx + 1 else idx

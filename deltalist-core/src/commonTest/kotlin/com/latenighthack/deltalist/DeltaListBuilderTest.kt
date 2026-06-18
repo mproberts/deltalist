@@ -25,7 +25,7 @@ class DeltaListBuilderTest {
         job.cancel()
 
         assertEquals(1, results.size)
-        assertEquals(listOf(Item("1", "A"), Item("2", "B")), results[0].items)
+        assertEquals(listOf(Item("1", "A"), Item("2", "B")), results[0].items.toList())
         assertTrue(results[0].change is Change.Reload)
     }
 
@@ -71,14 +71,14 @@ class DeltaListBuilderTest {
         assertEquals(1, change1.operations.size)
         val insert1 = change1.operations[0] as Mutation.Insert
         assertEquals(0, insert1.index)
-        assertEquals(listOf(Item("1", "A")), results[1].items)
+        assertEquals(listOf(Item("1", "A")), results[1].items.toList())
 
         // Third: insert second item
         val change2 = results[2].change as Change.Mutations
         assertEquals(1, change2.operations.size)
         val insert2 = change2.operations[0] as Mutation.Insert
         assertEquals(1, insert2.index)
-        assertEquals(listOf(Item("1", "A"), Item("2", "B")), results[2].items)
+        assertEquals(listOf(Item("1", "A"), Item("2", "B")), results[2].items.toList())
     }
 
     @Test
@@ -108,7 +108,7 @@ class DeltaListBuilderTest {
         val change = results[1].change as Change.Mutations
         assertEquals(3, change.operations.size)
         assertTrue(change.operations.all { it is Mutation.Insert })
-        assertEquals(listOf(Item("1", "A"), Item("2", "B"), Item("3", "C")), results[1].items)
+        assertEquals(listOf(Item("1", "A"), Item("2", "B"), Item("3", "C")), results[1].items.toList())
     }
 
     @Test
@@ -131,7 +131,7 @@ class DeltaListBuilderTest {
         assertEquals(1, change.operations.size)
         val remove = change.operations[0] as Mutation.Remove
         assertEquals(0, remove.index)
-        assertEquals(listOf(Item("2", "B")), results[1].items)
+        assertEquals(listOf(Item("2", "B")), results[1].items.toList())
     }
 
     @Test
@@ -154,7 +154,7 @@ class DeltaListBuilderTest {
         assertEquals(1, change.operations.size)
         val update = change.operations[0] as Mutation.Update
         assertEquals(0, update.index)
-        assertEquals(listOf(Item("1", "A-Updated")), results[1].items)
+        assertEquals(listOf(Item("1", "A-Updated")), results[1].items.toList())
     }
 
     @Test
@@ -178,7 +178,7 @@ class DeltaListBuilderTest {
         val move = change.operations[0] as Mutation.Move
         assertEquals(0, move.fromIndex)
         assertEquals(2, move.toIndex)
-        assertEquals(listOf(Item("2", "B"), Item("3", "C"), Item("1", "A")), results[1].items)
+        assertEquals(listOf(Item("2", "B"), Item("3", "C"), Item("1", "A")), results[1].items.toList())
     }
 
     @Test
@@ -222,7 +222,7 @@ class DeltaListBuilderTest {
         assertEquals(2, results.size)
         assertTrue(results[0].change is Change.Reload)
         assertTrue(results[1].change is Change.Reload)
-        assertEquals(listOf(Item("2", "B"), Item("3", "C")), results[1].items)
+        assertEquals(listOf(Item("2", "B"), Item("3", "C")), results[1].items.toList())
     }
 
     @Test
@@ -262,11 +262,11 @@ class DeltaListBuilderTest {
         // Initial reload
         assertTrue(results[0].change is Change.Reload)
         // Add A
-        assertEquals(listOf(Item("A", "A")), results[1].items)
+        assertEquals(listOf(Item("A", "A")), results[1].items.toList())
         // Add B
-        assertEquals(listOf(Item("A", "A"), Item("B", "B")), results[2].items)
+        assertEquals(listOf(Item("A", "A"), Item("B", "B")), results[2].items.toList())
         // Remove A
-        assertEquals(listOf(Item("B", "B")), results[3].items)
+        assertEquals(listOf(Item("B", "B")), results[3].items.toList())
     }
 
     @Test
@@ -319,7 +319,7 @@ class DeltaListBuilderTest {
         assertTrue(change.operations[0] is Mutation.Insert)
         assertTrue(change.operations[1] is Mutation.Remove)
         assertTrue(change.operations[2] is Mutation.Update)
-        assertEquals(listOf(Item("2", "B-Updated"), Item("3", "C")), results[1].items)
+        assertEquals(listOf(Item("2", "B-Updated"), Item("3", "C")), results[1].items.toList())
     }
 
     @Test
@@ -343,7 +343,7 @@ class DeltaListBuilderTest {
         val insert = change.operations[0] as Mutation.Insert
         assertEquals(1, insert.index)
         assertEquals(1, insert.count)
-        assertEquals(listOf(Item("1", "A"), Item("2", "B"), Item("3", "C")), results[1].items)
+        assertEquals(listOf(Item("1", "A"), Item("2", "B"), Item("3", "C")), results[1].items.toList())
     }
 
     @Test
@@ -367,7 +367,7 @@ class DeltaListBuilderTest {
         val insert = change.operations[0] as Mutation.Insert
         assertEquals(1, insert.index)
         assertEquals(2, insert.count)
-        assertEquals(listOf(Item("1", "A"), Item("2", "B"), Item("3", "C")), results[1].items)
+        assertEquals(listOf(Item("1", "A"), Item("2", "B"), Item("3", "C")), results[1].items.toList())
     }
 
     @Test
@@ -391,7 +391,7 @@ class DeltaListBuilderTest {
         val insert = change.operations[0] as Mutation.Insert
         assertEquals(1, insert.index)
         assertEquals(2, insert.count)
-        assertEquals(listOf(Item("1", "A"), Item("2", "B"), Item("3", "C"), Item("4", "D")), results[1].items)
+        assertEquals(listOf(Item("1", "A"), Item("2", "B"), Item("3", "C"), Item("4", "D")), results[1].items.toList())
     }
 
     @Test
@@ -434,7 +434,7 @@ class DeltaListBuilderTest {
         assertEquals(1, change.operations.size)
         val remove = change.operations[0] as Mutation.Remove
         assertEquals(1, remove.index)
-        assertEquals(listOf(Item("1", "A"), Item("3", "C")), results[1].items)
+        assertEquals(listOf(Item("1", "A"), Item("3", "C")), results[1].items.toList())
     }
 
     @Test
@@ -515,7 +515,7 @@ class DeltaListBuilderTest {
         val move = change.operations[0] as Mutation.Move
         assertEquals(0, move.fromIndex)
         assertEquals(2, move.toIndex)
-        assertEquals(listOf(Item("2", "B"), Item("3", "C"), Item("1", "A")), results[1].items)
+        assertEquals(listOf(Item("2", "B"), Item("3", "C"), Item("1", "A")), results[1].items.toList())
     }
 
     @Test
@@ -564,12 +564,12 @@ class DeltaListBuilderTest {
         // First batch
         val change1 = results[1].change as Change.Mutations
         assertEquals(2, change1.operations.size)
-        assertEquals(listOf(Item("1", "A"), Item("2", "B")), results[1].items)
+        assertEquals(listOf(Item("1", "A"), Item("2", "B")), results[1].items.toList())
 
         // Second batch
         val change2 = results[2].change as Change.Mutations
         assertEquals(2, change2.operations.size)
-        assertEquals(listOf(Item("2", "B"), Item("3", "C")), results[2].items)
+        assertEquals(listOf(Item("2", "B"), Item("3", "C")), results[2].items.toList())
     }
 
     @Test
@@ -609,7 +609,7 @@ class DeltaListBuilderTest {
         val change3 = results[3].change as Change.Mutations
         assertEquals(1, change3.operations.size)
         assertTrue(change3.operations[0] is Mutation.Remove)
-        assertEquals(listOf(Item("2", "B"), Item("3", "C")), results[3].items)
+        assertEquals(listOf(Item("2", "B"), Item("3", "C")), results[3].items.toList())
     }
 
     @Test
@@ -733,7 +733,7 @@ class DeltaListBuilderTest {
         assertTrue(change.operations[1] is Mutation.Insert)
         assertTrue(change.operations[2] is Mutation.Insert)
         assertTrue(change.operations[3] is Mutation.Insert)
-        assertEquals(listOf(Item("3", "C"), Item("4", "D"), Item("5", "E")), results[1].items)
+        assertEquals(listOf(Item("3", "C"), Item("4", "D"), Item("5", "E")), results[1].items.toList())
     }
 
     @Test
@@ -764,7 +764,7 @@ class DeltaListBuilderTest {
 
         // Final reload
         assertTrue(results[3].change is Change.Reload)
-        assertEquals(listOf(Item("X", "New"), Item("Y", "List")), results[3].items)
+        assertEquals(listOf(Item("X", "New"), Item("Y", "List")), results[3].items.toList())
     }
 
     @Test
@@ -788,7 +788,7 @@ class DeltaListBuilderTest {
 
         val change = results[1].change as Change.Mutations
         assertEquals(2, change.operations.size)
-        assertEquals(listOf(Item("1", "A"), Item("X", "Middle"), Item("2", "B")), results[1].items)
+        assertEquals(listOf(Item("1", "A"), Item("X", "Middle"), Item("2", "B")), results[1].items.toList())
     }
 
     @Test

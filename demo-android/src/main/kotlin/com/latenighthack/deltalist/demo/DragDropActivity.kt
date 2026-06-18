@@ -51,6 +51,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.latenighthack.deltalist.DragState
 import com.latenighthack.deltalist.MoveableDeltaList
+import com.latenighthack.deltalist.softLoadedItems
 import com.latenighthack.deltalist.android.compose.collectAsDeltaState
 import com.latenighthack.deltalist.android.recyclerview.DeltaAdapter
 import com.latenighthack.deltalist.demo.ui.theme.DeltaListDemoTheme
@@ -123,7 +124,7 @@ private fun DragDropComposeContent(viewModel: DragDropViewModel) {
             state = lazyListState
         ) {
             itemsIndexed(
-                items = delta.items,
+                items = delta.items.softLoadedItems(),
                 key = { _, item -> item.id }
             ) { index, item ->
                 ReorderableItem(reorderableLazyListState, key = item.id) { isDragging ->

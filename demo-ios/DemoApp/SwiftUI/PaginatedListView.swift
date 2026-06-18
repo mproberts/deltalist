@@ -1,8 +1,12 @@
 import SwiftUI
+import DemoCore
+import DeltaListCore
 
 /// Paginated list demo screen with 10K items and dynamic filtering.
 struct PaginatedListView: View {
     @StateObject private var viewModel = PaginatedListViewModelAdapter()
+    // Consolidated DeltaListCore wrapper handles the soft list (placeholders + lazy paging).
+    @StateObject private var list = DeltaListCore.DeltaList<DemoCore.KotlinInt>()
     @State private var selectedTab = 0
 
     var body: some View {
@@ -17,13 +21,16 @@ struct PaginatedListView: View {
 
             // Content
             if selectedTab == 0 {
-                PaginatedSwiftUIContent(viewModel: viewModel)
+                PaginatedSwiftUIContent(viewModel: viewModel, list: list)
             } else {
-                PaginatedUIKitContent(viewModel: viewModel)
+                PaginatedUIKitContent(viewModel: viewModel, list: list)
             }
         }
         .navigationTitle("Paginated List")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await list.collect(viewModel.viewModel.paginatedNumbers)
+        }
     }
 }
 
@@ -31,23 +38,24 @@ struct PaginatedListView: View {
 
 private struct PaginatedSwiftUIContent: View {
     @ObservedObject var viewModel: PaginatedListViewModelAdapter
+    @ObservedObject var list: DeltaListCore.DeltaList<DemoCore.KotlinInt>
 
     var body: some View {
         VStack(spacing: 0) {
             // Status bar
-            PaginatedStatusBar(viewModel: viewModel)
+            PaginatedStatusBar(viewModel: viewModel, list: list)
 
             // List - show totalSize items, with placeholders for unloaded ones
             List {
-                ForEach(0..<viewModel.totalSize, id: \.self) { index in
-                    if let number = viewModel.getLoadedItemAt(index: index) {
+                ForEach(0..<list.totalSize, id: \.self) { index in
+                    if let number = list.loadedItem(at: index) {
                         // Item is loaded - show the value
-                        NumberItemRow(number: number, index: index)
+                        NumberItemRow(number: Int(number.intValue), index: index)
                     } else {
                         // Item not loaded - show placeholder and trigger fetch
                         LoadingRow()
                             .onAppear {
-                                viewModel.triggerLoadAt(index: index)
+                                list.triggerLoad(at: index)
                             }
                     }
                 }
@@ -64,6 +72,7 @@ private struct PaginatedSwiftUIContent: View {
 
 private struct PaginatedStatusBar: View {
     @ObservedObject var viewModel: PaginatedListViewModelAdapter
+    @ObservedObject var list: DeltaListCore.DeltaList<DemoCore.KotlinInt>
 
     var body: some View {
         HStack {
@@ -71,7 +80,7 @@ private struct PaginatedStatusBar: View {
                 Text("Paginated List (10,000 items)")
                     .font(.headline)
 
-                Text("Loaded: \(viewModel.loadedCount) / Filtered: \(viewModel.numbers.count) / Total: \(viewModel.totalSize)")
+                Text("Loaded: \(viewModel.loadedCount) / Filtered: \(list.loadedItems.count) / Total: \(list.totalSize)")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -161,10 +170,11 @@ private struct DivisorFilterBar: View {
 
 private struct PaginatedUIKitContent: View {
     @ObservedObject var viewModel: PaginatedListViewModelAdapter
+    @ObservedObject var list: DeltaListCore.DeltaList<DemoCore.KotlinInt>
 
     var body: some View {
         VStack(spacing: 0) {
-            PaginatedStatusBar(viewModel: viewModel)
+            PaginatedStatusBar(viewModel: viewModel, list: list)
 
             PaginatedListViewControllerRepresentable(viewModel: viewModel)
 

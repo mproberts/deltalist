@@ -1,5 +1,19 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.*
+
+import com.latenighthack.deltalist.get
+import com.latenighthack.deltalist.toList
+import com.latenighthack.deltalist.iterator
+import com.latenighthack.deltalist.isEmpty
+import com.latenighthack.deltalist.isNotEmpty
+import com.latenighthack.deltalist.indices
+import com.latenighthack.deltalist.map
+import com.latenighthack.deltalist.filter
+import com.latenighthack.deltalist.forEach
+import com.latenighthack.deltalist.first
+import com.latenighthack.deltalist.last
+import com.latenighthack.deltalist.contains
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.LoadDirection
@@ -137,16 +151,14 @@ class PaginatedFilterIntegrationTest {
         delay(100)
         assertEquals(1, fetchCount) // Initial load
 
-        // Access filtered index beyond loaded items
-        try {
-            results.last().items[10]
-        } catch (_: IndexOutOfBoundsException) {}
+        // Request a filtered placeholder beyond loaded items.
+        (results.last().items.softGet(10) as? SoftValue.NotLoaded)?.request()
 
         delay(100)
         job.cancel()
 
         // Should have triggered additional fetch
-        assertTrue(fetchCount > 1, "Accessing unloaded filtered index should trigger fetch")
+        assertTrue(fetchCount > 1, "Requesting an unloaded filtered index should trigger fetch")
     }
 
     @Test
@@ -329,8 +341,10 @@ class PaginatedFilterIntegrationTest {
 
         delay(100)
 
-        // Initial: 10 even numbers from 1-20, estimated 50
-        assertEquals(50, results.last().items.size)
+        // The source is exhausted (afterToken null), so its unreachable estimate of 100 is
+        // ignored and it reports its 20 real items. The filter is therefore exact, not
+        // extrapolated: 10 evens.
+        assertEquals(10, results.last().items.size)
 
         // Change to divisible by 10 (only 10 and 20)
         predicateFlow.value = { it % 10 == 0 }
@@ -338,8 +352,8 @@ class PaginatedFilterIntegrationTest {
         delay(100)
         job.cancel()
 
-        // New ratio: 2/20 = 10%, estimated = 10
-        assertEquals(10, results.last().items.size)
+        // Exact again: 2 matches.
+        assertEquals(2, results.last().items.size)
     }
 
     // ==================== Operator Chaining Tests ====================
@@ -494,8 +508,16 @@ class PaginatedFilterIntegrationTest {
         delay(100)
         job.cancel()
 
-        // 0% ratio -> estimated 0
-        assertEquals(0, results.last().items.size)
+        // The first page matches nothing, but the source still has more pages, so the
+        // filtered list must NOT collapse to size 0 (which would render an empty,
+        // unscrollable list and permanently stall pagination). Instead it keeps at least
+        // one NotLoaded placeholder so accessing it cascades the next fetch.
+        val last = results.last()
+        assertTrue(last.items.size >= 1, "filter must keep a placeholder while source has more pages")
+        assertTrue(
+            last.items.softGetOrNull(last.items.size - 1) is SoftValue.NotLoaded,
+            "the trailing placeholder must be NotLoaded so it triggers a fetch"
+        )
     }
 
     @Test
@@ -565,15 +587,5 @@ class PaginatedFilterIntegrationTest {
             lastDelta.items.softGetOrNull(it) is SoftValue.Present
         }
         assertTrue(allPresent, "All items should be loaded when source is fully loaded")
-    }
-}
-
-// Extension for test readability
-private fun <T> List<T>.softGetOrNull(index: Int): SoftValue<T>? {
-    return if (this is SoftList<T>) {
-        softGet(index)
-    } else {
-        if (index < 0 || index >= size) null
-        else SoftValue.Present(get(index))
     }
 }

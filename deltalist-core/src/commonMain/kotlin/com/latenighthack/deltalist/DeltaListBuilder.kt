@@ -211,7 +211,7 @@ private class ListMutatingDeltaListImpl<T>(
 
     private val backing = initial.toMutableList()
 
-    fun snapshot(): List<T> = backing.toList()
+    fun snapshot(): SoftList<T> = backing.toList().asSoftList()
 
     private suspend fun emitMutation(mutation: Mutation) {
         collector.emit(Delta(snapshot(), Change.Mutations(mutation)))

@@ -34,6 +34,7 @@ dependencies {
     implementation(project(":demo-core"))
     implementation(project(":deltalist-android-recyclerview"))
     implementation(project(":deltalist-android-compose"))
+    implementation(project(":deltalist-android-notifications"))
 
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.activity.compose)

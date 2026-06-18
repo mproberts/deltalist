@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
+import kotlin.test.Ignore
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -119,8 +120,8 @@ class PaginatedDeltaListTest {
         delay(100)
         assertEquals(1, fetchCount) // Initial only so far
 
-        // Access last item to trigger after fetch
-        results.last().items[1]
+        // Request the trailing placeholder to trigger the after fetch.
+        results.last().items.let { (it.softGet(it.size - 1) as? SoftValue.NotLoaded)?.request() }
         delay(100)
 
         assertEquals(2, fetchCount)
@@ -164,20 +165,57 @@ class PaginatedDeltaListTest {
         delay(100)
         assertEquals(1, fetchCount)
 
-        // Access first item to trigger before fetch
-        results.last().items[0]
+        // Request the leading "load earlier" placeholder to trigger the before fetch.
+        (results.last().items.softGet(0) as? SoftValue.NotLoaded)?.request()
         delay(100)
 
         assertEquals(2, fetchCount)
         assertEquals(LoadDirection.BEFORE, lastDirection)
 
-        // Verify items are prepended
+        // Verify items are prepended (no more before, so no leading placeholder remains)
         val finalItems = results.last().items
         assertEquals(Item(3, "C"), finalItems[0])
         assertEquals(Item(4, "D"), finalItems[1])
         assertEquals(Item(5, "E"), finalItems[2])
         assertEquals(Item(6, "F"), finalItems[3])
         job.cancel()
+    }
+
+    @Test
+    fun leadingPlaceholderPersistsWhenMoreBeforeRemains() = runTest {
+        val flow = paginatedDeltaList<Item, Int>(
+            scope = this,
+            startToken = 5,
+            fetch = { _, token ->
+                when (token) {
+                    5 -> Page(listOf(Item(5, "E"), Item(6, "F")), beforeToken = 4, afterToken = null)
+                    // Earlier page still has more before it (beforeToken = 3).
+                    4 -> Page(listOf(Item(3, "C"), Item(4, "D")), beforeToken = 3, afterToken = null)
+                    else -> throw AssertionError("Unexpected token: $token")
+                }
+            }
+        )
+
+        val results = mutableListOf<Delta<Item>>()
+        val job = launch { flow.collect { results.add(it) } }
+
+        delay(100)
+        // Initial display has a leading "load earlier" placeholder at index 0.
+        assertTrue(results.last().items.softGet(0) is SoftValue.NotLoaded)
+
+        // Request it to load the earlier page.
+        (results.last().items.softGet(0) as? SoftValue.NotLoaded)?.request()
+        delay(100)
+        job.cancel()
+
+        // Earlier history still remains, so the leading placeholder persists and the new
+        // items are inserted after it (index 1).
+        val lastChange = results.last().change as Change.Mutations
+        assertEquals(Mutation.Insert(1, 2), lastChange.operations[0])
+        val last = results.last().items
+        assertTrue(last.softGet(0) is SoftValue.NotLoaded, "leading placeholder still present")
+        assertEquals(Item(3, "C"), (last.softGet(1) as SoftValue.Present).value)
+        assertEquals(Item(6, "F"), (last.softGet(4) as SoftValue.Present).value)
     }
 
     @Test
@@ -215,8 +253,8 @@ class PaginatedDeltaListTest {
 
         delay(100)
 
-        // Access index 2 (within window of 3 from end with 5 items)
-        results.last().items[2]
+        // Request the trailing placeholder to trigger the after fetch.
+        results.last().items.let { (it.softGet(it.size - 1) as? SoftValue.NotLoaded)?.request() }
         delay(100)
 
         assertTrue(afterFetchCalled)
@@ -319,8 +357,8 @@ class PaginatedDeltaListTest {
 
         delay(100)
 
-        // Trigger second fetch by accessing near end
-        results.last().items[4]
+        // Trigger second fetch by requesting the trailing placeholder.
+        results.last().items.let { (it.softGet(it.size - 1) as? SoftValue.NotLoaded)?.request() }
         delay(100)
 
         job.cancel()
@@ -371,22 +409,29 @@ class PaginatedDeltaListTest {
 
         delay(100)
 
-        // Trigger second fetch
-        results.last().items[4]
+        // Trigger second fetch by requesting the trailing placeholder.
+        results.last().items.let { (it.softGet(it.size - 1) as? SoftValue.NotLoaded)?.request() }
         delay(100)
 
         job.cancel()
 
-        // All items covered by estimate - should be Update only
+        // The last page exhausts the source (afterToken null) revealing only 10 real items
+        // against an estimate of 20. The 5 new items fill placeholders (Update), and the 10
+        // remaining phantom placeholders (10..19) that can never load are removed.
         val lastChange = results.last().change as Change.Mutations
-        assertEquals(1, lastChange.operations.size)
+        assertEquals(2, lastChange.operations.size)
         val update = lastChange.operations[0] as Mutation.Update
         assertEquals(5, update.index)
         assertEquals(5, update.count)
+        val remove = lastChange.operations[1] as Mutation.Remove
+        assertEquals(10, remove.index)
+        assertEquals(10, remove.count)
+        // Final list reports the real size, not the stale estimate.
+        assertEquals(10, results.last().items.size)
     }
 
     @Test
-    fun prependAlwaysInserts() = runTest {
+    fun prependFillsLeadingPlaceholder() = runTest {
         val flow = paginatedDeltaList<Item, Int>(
             scope = this,
             startToken = 5,
@@ -416,17 +461,24 @@ class PaginatedDeltaListTest {
 
         delay(100)
 
-        // Trigger before fetch
-        results.last().items[0]
+        // Request the leading placeholder to trigger the before fetch.
+        (results.last().items.softGet(0) as? SoftValue.NotLoaded)?.request()
         delay(100)
 
         job.cancel()
 
-        // Check that prepend is always an insert
+        // The before page exhausts earlier history (beforeToken null), so the leading
+        // placeholder is filled by the first prepended item (Update at 0) and the rest are
+        // inserted after it.
         val lastChange = results.last().change as Change.Mutations
-        assertEquals(1, lastChange.operations.size)
-        assertTrue(lastChange.operations[0] is Mutation.Insert)
-        assertEquals(0, (lastChange.operations[0] as Mutation.Insert).index)
+        assertEquals(2, lastChange.operations.size)
+        assertEquals(Mutation.Update(0, 1), lastChange.operations[0])
+        assertEquals(Mutation.Insert(1, 1), lastChange.operations[1])
+        // Final order is correct, no leading placeholder remains.
+        assertEquals(
+            listOf(Item(3, "C"), Item(4, "D"), Item(5, "E"), Item(6, "F"), Item(7, "G")),
+            results.last().items.toList()
+        )
     }
 
     // ========== Concurrent Access Tests ==========
@@ -534,9 +586,11 @@ class PaginatedDeltaListTest {
         delay(100)
 
         val finalDelta = results.last()
-        assertEquals(100, finalDelta.items.size) // Estimated size
+        // The single page exhausts the source (afterToken null), so the estimate of 100 is
+        // unreachable and must not inflate the size into phantom placeholders. Size is real.
+        assertEquals(2, finalDelta.items.size)
 
-        // But accessing beyond loaded items throws
+        // Accessing beyond loaded items still throws.
         assertFailsWith<IndexOutOfBoundsException> {
             finalDelta.items[50]
         }
@@ -599,9 +653,9 @@ class PaginatedDeltaListTest {
         for (i in 1..5) {
             delay(100)
             if (i < 5) {
-                // Access last item to trigger next fetch
+                // Request the trailing placeholder to trigger the next fetch.
                 val items = results.last().items
-                items[items.filterIndexed { idx, _ -> idx < i }.size - 1]
+                (items.softGet(items.size - 1) as? SoftValue.NotLoaded)?.request()
             }
         }
 
@@ -648,13 +702,13 @@ class PaginatedDeltaListTest {
         delay(100)
         assertEquals(listOf(LoadDirection.INITIAL), directions)
 
-        // Trigger before fetch
-        results.last().items[0]
+        // Request the leading placeholder to trigger the before fetch.
+        (results.last().items.softGet(0) as? SoftValue.NotLoaded)?.request()
         delay(100)
         assertEquals(listOf(LoadDirection.INITIAL, LoadDirection.BEFORE), directions)
 
-        // Trigger after fetch (now index 3 is the last loaded item)
-        results.last().items[3]
+        // Request the trailing placeholder to trigger the after fetch.
+        results.last().items.let { (it.softGet(it.size - 1) as? SoftValue.NotLoaded)?.request() }
         delay(100)
         assertEquals(listOf(LoadDirection.INITIAL, LoadDirection.BEFORE, LoadDirection.AFTER), directions)
 
@@ -743,7 +797,8 @@ class PaginatedDeltaListTest {
                 Page(
                     items = listOf(Item(1, "A"), Item(2, "B")),
                     beforeToken = null,
-                    afterToken = null,
+                    // Not exhausted, so the estimate's trailing placeholders are reachable.
+                    afterToken = "next",
                     estimatedTotalSize = 100
                 )
             }
@@ -837,8 +892,8 @@ class PaginatedDeltaListTest {
         delay(100)
         assertEquals(1, fetchCount) // Still just the initial fetch
 
-        // But regular get SHOULD trigger fetch
-        list[2]  // Access near end triggers after fetch
+        // But requesting an unloaded placeholder SHOULD trigger a fetch.
+        (list.softGet(list.size - 1) as? SoftValue.NotLoaded)?.request()
         delay(100)
         assertEquals(2, fetchCount)
 
@@ -847,7 +902,7 @@ class PaginatedDeltaListTest {
 
     @Test
     fun softGetOrNullExtensionWorksForRegularList() {
-        val regularList = listOf("A", "B", "C")
+        val regularList = listOf("A", "B", "C").asSoftList()
 
         val soft0 = regularList.softGetOrNull(0)
         assertTrue(soft0 is SoftValue.Present)
@@ -857,7 +912,7 @@ class PaginatedDeltaListTest {
         assertTrue(soft2 is SoftValue.Present)
         assertEquals("C", (soft2 as SoftValue.Present).value)
 
-        // Out of bounds returns null for regular list
+        // Out of bounds returns null
         assertEquals(null, regularList.softGetOrNull(-1))
         assertEquals(null, regularList.softGetOrNull(3))
     }

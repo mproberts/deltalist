@@ -29,51 +29,43 @@ package com.latenighthack.deltalist
  * }
  * ```
  */
-interface LazyList<out T> : List<T> {
+interface LazyList<out T> : SoftList<T> {
+    /**
+     * Acquires (pins) the item at [index] and returns its current load state, computing
+     * and caching the value on first acquire. This is the lifecycle-aware replacement for
+     * the old `get(index)` access. Pair every acquire with a [release].
+     */
+    fun acquire(index: Int): SoftValue<T>
+
     /**
      * Releases the cached value at the given index, allowing it to be garbage collected.
      *
-     * After release, the next access to this index will recompute the value.
-     * Platform bindings should call this when items scroll out of view.
-     *
-     * @param index The index of the item to release
+     * After the last acquirer releases, the next access recomputes the value. Platform
+     * bindings should call this when items scroll out of view.
      */
     fun release(index: Int)
 
-    /**
-     * Releases all cached values in the list.
-     *
-     * Call this during cleanup (e.g., when unbinding from lifecycle) to free all resources.
-     */
+    /** Releases all cached values (e.g. when unbinding from lifecycle). */
     fun releaseAll()
 
-    /**
-     * Whether the item at the given index currently has an acquired (cached) value.
-     *
-     * @param index The index to check
-     * @return true if the item is currently acquired, false otherwise
-     */
+    /** Whether the item at the given index currently has an acquired (cached) value. */
     fun isAcquired(index: Int): Boolean
 }
 
 /**
- * Releases the item at the given index if this list is a [LazyList].
- *
- * This is a convenience extension for platform adapters that need to conditionally
- * release items without knowing whether the underlying list supports lazy access.
- *
- * @param index The index of the item to release
+ * Acquire-and-pin the item at [index] if this is a [LazyList]; otherwise a plain soft peek.
+ * Platform bindings use this to render an item (and pin it for lifecycle) without caring
+ * whether the underlying snapshot supports lazy access.
  */
-fun <T> List<T>.releaseIfLazy(index: Int) {
+fun <T> SoftList<T>.acquireOrGet(index: Int): SoftValue<T> =
+    if (this is LazyList<T>) acquire(index) else (softGet(index) ?: SoftValue.NotLoaded())
+
+/** Releases the item at the given index if this snapshot is a [LazyList]. */
+fun <T> SoftList<T>.releaseIfLazy(index: Int) {
     (this as? LazyList<*>)?.release(index)
 }
 
-/**
- * Releases all items if this list is a [LazyList].
- *
- * This is a convenience extension for platform adapters that need to conditionally
- * release all items without knowing whether the underlying list supports lazy access.
- */
-fun <T> List<T>.releaseAllIfLazy() {
+/** Releases all items if this snapshot is a [LazyList]. */
+fun <T> SoftList<T>.releaseAllIfLazy() {
     (this as? LazyList<*>)?.releaseAll()
 }

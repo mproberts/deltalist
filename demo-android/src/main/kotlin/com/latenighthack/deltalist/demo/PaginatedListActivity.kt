@@ -128,10 +128,9 @@ private fun PaginatedComposeContent(viewModel: PaginatedListViewModel) {
                         NumberItemCard(number = soft.value, index = index)
                     }
                     is SoftValue.NotLoaded -> {
-                        // Trigger fetch - the filter operator handles cascading automatically
-                        try {
-                            delta.items[index]
-                        } catch (_: IndexOutOfBoundsException) {}
+                        // Trigger fetch by requesting the placeholder - the filter/pagination
+                        // operators handle cascading automatically.
+                        soft.request()
                         LoadingItemCard(index = index)
                     }
                     null -> {}
@@ -164,11 +163,14 @@ private fun PaginatedRecyclerViewContent(viewModel: PaginatedListViewModel) {
     val excludeDivisors by viewModel.excludeDivisors.collectAsState()
     val isLoading = loadingDirection != null
     val lifecycleOwner = LocalLifecycleOwner.current
+    // Driven by the adapter (the single collector of the delta flow) so it stays in sync with
+    // the list as pages load and the filter recomputes.
+    var filteredCount by remember { mutableIntStateOf(0) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         PaginatedStatusBar(
             loadedSize = loadedCount,
-            filteredSize = 0,
+            filteredSize = filteredCount,
             reportedSize = 10_000,
             isLoading = isLoading
         )
@@ -179,7 +181,9 @@ private fun PaginatedRecyclerViewContent(viewModel: PaginatedListViewModel) {
                 factory = { context ->
                     RecyclerView(context).apply {
                         layoutManager = LinearLayoutManager(context)
-                        adapter = PaginatedNumberAdapter(viewModel.paginatedNumbers).also { adapter ->
+                        adapter = PaginatedNumberAdapter(viewModel.paginatedNumbers) { size ->
+                            filteredCount = size
+                        }.also { adapter ->
                             adapter.bind(lifecycleOwner)
                         }
                     }
@@ -306,12 +310,17 @@ private fun LoadingItemCard(index: Int) {
 // RecyclerView Adapter using DeltaAdapter with SoftList support
 // Uses softGetItem() to determine view types for loaded vs loading states
 private class PaginatedNumberAdapter(
-    deltaList: DeltaList<Int>
+    deltaList: DeltaList<Int>,
+    private val onSizeChanged: (Int) -> Unit
 ) : DeltaAdapter<Int, RecyclerView.ViewHolder>(deltaList) {
 
     companion object {
         private const val VIEW_TYPE_LOADED = 0
         private const val VIEW_TYPE_LOADING = 1
+    }
+
+    override fun onItemsChanged() {
+        onSizeChanged(itemCount)
     }
 
     override fun getItemViewType(position: Int): Int {
@@ -382,11 +391,10 @@ private class PaginatedNumberAdapter(
                 }
             }
             is LoadingViewHolder -> {
-                // Trigger fetch for unloaded items by accessing via getItem()
-                // The filter operator handles cascading fetches automatically
-                try {
-                    getItem(position)
-                } catch (_: IndexOutOfBoundsException) {}
+                // Trigger the fetch by requesting the placeholder, mirroring the Compose path.
+                // getItem() intentionally does NOT fetch — loads are explicit via request().
+                // The filter/pagination operators handle cascading fetches automatically.
+                (softGetItem(position) as? SoftValue.NotLoaded)?.request()
             }
         }
     }

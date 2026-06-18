@@ -1,5 +1,20 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.*
+
+import com.latenighthack.deltalist.get
+import com.latenighthack.deltalist.toList
+import com.latenighthack.deltalist.iterator
+import com.latenighthack.deltalist.isEmpty
+import com.latenighthack.deltalist.isNotEmpty
+import com.latenighthack.deltalist.indices
+import com.latenighthack.deltalist.map
+import com.latenighthack.deltalist.filter
+import com.latenighthack.deltalist.forEach
+import com.latenighthack.deltalist.first
+import com.latenighthack.deltalist.last
+import com.latenighthack.deltalist.contains
+
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.LazyList
@@ -115,6 +130,69 @@ class LazyMapTest {
         lazyList.release(1)
         assertFalse(lazyList.isAcquired(1))
         assertTrue(lazyList.isAcquired(3))
+
+        job.cancel()
+    }
+
+    @Test
+    fun refcountKeepsItemAcquiredUntilLastRelease() = runTest {
+        resetTransformCount()
+        val source = mutableDeltaListOf(listOf("a", "b", "c"))
+        val lazy = source.lazyMap { countingTransform(it) }
+
+        val results = mutableListOf<Delta<String>>()
+        val job = launch { lazy.collect { results.add(it) } }
+
+        delay(50)
+
+        val lazyList = results[0].lazyList()
+
+        // Two independent acquirers of the same index (e.g. a sticky header + a row).
+        results[0].items[1]
+        results[0].items[1]
+        assertEquals(1, transformCallCount) // computed once, cached
+
+        // First release must NOT evict while a second acquirer still holds the item.
+        lazyList.release(1)
+        assertTrue(lazyList.isAcquired(1), "still referenced by the second acquirer")
+
+        // Second release drops the last reference and evicts.
+        lazyList.release(1)
+        assertFalse(lazyList.isAcquired(1))
+
+        // Extra releases are safe no-ops.
+        lazyList.release(1)
+        assertFalse(lazyList.isAcquired(1))
+
+        job.cancel()
+    }
+
+    @Test
+    fun supersededViewReleaseIsNoOp() = runTest {
+        val source = mutableDeltaListOf(listOf("a", "b", "c"))
+        val lazy = source.lazyMap { "t:$it" }
+
+        val results = mutableListOf<Delta<String>>()
+        val job = launch { lazy.collect { results.add(it) } }
+
+        delay(50)
+
+        val staleList = results[0].lazyList()
+        staleList[1] // acquire "b" at index 1 while this view is current
+        assertTrue(staleList.isAcquired(1))
+
+        // A new delta supersedes the first view; "b" shifts to index 2 in the live cache.
+        source.insert(0, "x")
+        delay(50)
+
+        val currentList = results[1].lazyList()
+        assertTrue(currentList.isAcquired(2))
+
+        // Acting on the superseded view must not touch the live cache, and the stale view
+        // now reports nothing acquired.
+        staleList.release(1)
+        assertTrue(currentList.isAcquired(2), "stale release must be a no-op")
+        assertFalse(staleList.isAcquired(1))
 
         job.cancel()
     }
@@ -661,7 +739,9 @@ class LazyMapTest {
         val jobs = (1..10).map {
             launch {
                 val value = latestDelta!!.items[1]
-                synchronized(results) { results.add(value) }
+                // runTest uses a single-threaded scheduler, so these launches are not truly
+                // parallel and need no lock (keeps this test runnable on JS/Native too).
+                results.add(value)
             }
         }
         jobs.forEach { it.join() }

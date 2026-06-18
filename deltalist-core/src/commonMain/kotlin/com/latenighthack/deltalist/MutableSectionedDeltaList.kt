@@ -77,37 +77,37 @@ internal class MutableSectionedDeltaListImpl<S, T>(
     override fun appendItem(sectionIndex: Int, item: T) {
         val current = state.value.sections.toMutableList()
         val section = current[sectionIndex]
-        val newItems = section.items.toMutableList()
+        val newItems = section.items.softLoadedItems().toMutableList()
         val itemIndex = newItems.size
         newItems.add(item)
-        current[sectionIndex] = section.copy(items = newItems)
+        current[sectionIndex] = section.copy(items = newItems.asSoftList())
         state.value = SectionedDelta(current, SectionedChange.Items(sectionIndex, Mutation.Insert(itemIndex)))
     }
 
     override fun insertItem(sectionIndex: Int, itemIndex: Int, item: T) {
         val current = state.value.sections.toMutableList()
         val section = current[sectionIndex]
-        val newItems = section.items.toMutableList()
+        val newItems = section.items.softLoadedItems().toMutableList()
         newItems.add(itemIndex, item)
-        current[sectionIndex] = section.copy(items = newItems)
+        current[sectionIndex] = section.copy(items = newItems.asSoftList())
         state.value = SectionedDelta(current, SectionedChange.Items(sectionIndex, Mutation.Insert(itemIndex)))
     }
 
     override fun removeItem(sectionIndex: Int, itemIndex: Int) {
         val current = state.value.sections.toMutableList()
         val section = current[sectionIndex]
-        val newItems = section.items.toMutableList()
+        val newItems = section.items.softLoadedItems().toMutableList()
         newItems.removeAt(itemIndex)
-        current[sectionIndex] = section.copy(items = newItems)
+        current[sectionIndex] = section.copy(items = newItems.asSoftList())
         state.value = SectionedDelta(current, SectionedChange.Items(sectionIndex, Mutation.Remove(itemIndex)))
     }
 
     override fun setItem(sectionIndex: Int, itemIndex: Int, item: T) {
         val current = state.value.sections.toMutableList()
         val section = current[sectionIndex]
-        val newItems = section.items.toMutableList()
+        val newItems = section.items.softLoadedItems().toMutableList()
         newItems[itemIndex] = item
-        current[sectionIndex] = section.copy(items = newItems)
+        current[sectionIndex] = section.copy(items = newItems.asSoftList())
         state.value = SectionedDelta(current, SectionedChange.Items(sectionIndex, Mutation.Update(itemIndex)))
     }
 
@@ -115,10 +115,10 @@ internal class MutableSectionedDeltaListImpl<S, T>(
         if (fromIndex == toIndex) return
         val current = state.value.sections.toMutableList()
         val section = current[sectionIndex]
-        val newItems = section.items.toMutableList()
+        val newItems = section.items.softLoadedItems().toMutableList()
         val item = newItems.removeAt(fromIndex)
         newItems.add(toIndex, item)
-        current[sectionIndex] = section.copy(items = newItems)
+        current[sectionIndex] = section.copy(items = newItems.asSoftList())
         state.value = SectionedDelta(current, SectionedChange.Items(sectionIndex, Mutation.Move(fromIndex, toIndex)))
     }
 
@@ -127,13 +127,13 @@ internal class MutableSectionedDeltaListImpl<S, T>(
     override fun updateSection(index: Int, block: (MutableList<T>) -> Unit) {
         val current = state.value.sections.toMutableList()
         val section = current[index]
-        val tracked = TrackedMutableList(section.items)
+        val tracked = TrackedMutableList(section.items.softLoadedItems())
         block(tracked)
 
         val mutations = tracked.toMutations()
         if (mutations.isEmpty()) return
 
-        current[index] = section.copy(items = tracked.toList())
+        current[index] = section.copy(items = tracked.toList().asSoftList())
         state.value = SectionedDelta(current, SectionedChange.Items(index, mutations))
     }
 

@@ -150,13 +150,15 @@ internal class MoveableDeltaListImpl<T>(
         // Check bounds
         if (index < 0 || index >= currentDelta.items.size) return false
 
-        val item = currentDelta.items[index]
+        // A moveable list is fully loaded; materialize once for index access.
+        val loaded = currentDelta.items.softLoadedItems()
+        val item = loaded[index]
 
         // Check if this item can be moved
         if (canMove != null && !canMove.invoke(item, index, index)) return false
 
         // Snapshot current state for potential revert
-        preDropItems = currentDelta.items.toList()
+        preDropItems = loaded
         originalDragIndex = index
 
         _dragState.value = DragState.Dragging(item, fromIndex = index, previewIndex = index)
@@ -181,13 +183,13 @@ internal class MoveableDeltaListImpl<T>(
         }
 
         // Perform the visual reorder
-        val newItems = currentDelta.items.toMutableList()
+        val newItems = currentDelta.items.softLoadedItems().toMutableList()
         val item = newItems.removeAt(current.previewIndex)
         newItems.add(clampedIndex, item)
 
         // Emit the reordered list with Move mutation
         _currentDelta.value = Delta(
-            newItems,
+            newItems.asSoftList(),
             Change.Mutations(listOf(Mutation.Move(current.previewIndex, clampedIndex)))
         )
 
@@ -273,7 +275,7 @@ internal class MoveableDeltaListImpl<T>(
     private fun revert() {
         val original = preDropItems
         if (original != null) {
-            _currentDelta.value = Delta(original, Change.Reload)
+            _currentDelta.value = Delta(original.asSoftList(), Change.Reload)
         }
         cleanup()
     }

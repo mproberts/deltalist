@@ -1,5 +1,21 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.*
+
+import com.latenighthack.deltalist.get
+import com.latenighthack.deltalist.toList
+import com.latenighthack.deltalist.iterator
+import com.latenighthack.deltalist.isEmpty
+import com.latenighthack.deltalist.isNotEmpty
+import com.latenighthack.deltalist.indices
+import com.latenighthack.deltalist.map
+import com.latenighthack.deltalist.filter
+import com.latenighthack.deltalist.forEach
+import com.latenighthack.deltalist.first
+import com.latenighthack.deltalist.last
+import com.latenighthack.deltalist.contains
+import com.latenighthack.deltalist.AbstractSoftList
+
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
@@ -30,17 +46,9 @@ class FilterPaginationTest {
     private class MockPaginatedList<T>(
         private val loadedItems: List<T>,
         private val estimatedTotal: Int
-    ) : AbstractList<T>(), SoftList<T> {
+    ) : AbstractSoftList<T>() {
 
         override val size: Int = maxOf(loadedItems.size, estimatedTotal)
-
-        override fun get(index: Int): T {
-            if (index < 0) throw IndexOutOfBoundsException("Index $index is negative")
-            if (index >= loadedItems.size) {
-                throw IndexOutOfBoundsException("Index $index beyond loaded items (loaded: ${loadedItems.size})")
-            }
-            return loadedItems[index]
-        }
 
         override fun softGet(index: Int): SoftValue<T>? {
             if (index < 0 || index >= size) return null
@@ -292,7 +300,9 @@ class FilterPaginationTest {
 
     @Test
     fun filterPaginatedList_zeroPassInitially() = runTest {
-        // Initial: 10 loaded, 0 pass → estimated 0, no placeholders
+        // Initial: 10 loaded, 0 pass, but the source still has more pages (10 < 100), so
+        // the filter must keep one NotLoaded placeholder instead of collapsing to size 0.
+        // A size-0 list renders empty and unscrollable, permanently stalling pagination.
 
         val sourceFlow = MutableStateFlow(
             Delta(
@@ -315,8 +325,9 @@ class FilterPaginationTest {
         job.cancel()
 
         assertEquals(1, results.size)
-        // 0% ratio → 0 estimated size
-        assertEquals(0, results[0].items.size)
+        // Anti-stall: at least one placeholder while the source is not exhausted.
+        assertEquals(1, results[0].items.size)
+        assertIs<SoftValue.NotLoaded>(results[0].items.softGetOrNull(0))
     }
 
     @Test
@@ -410,15 +421,5 @@ class FilterPaginationTest {
                 "Insert at ${insert.index} should have been Update (was within estimated size 10)"
             )
         }
-    }
-}
-
-// Extension for test readability
-private fun <T> List<T>.softGetOrNull(index: Int): SoftValue<T>? {
-    return if (this is SoftList<T>) {
-        softGet(index)
-    } else {
-        if (index < 0 || index >= size) null
-        else SoftValue.Present(get(index))
     }
 }

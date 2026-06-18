@@ -48,6 +48,13 @@ struct ContentView: View {
                             description: "Reorderable items with drag state"
                         )
                     }
+
+                    NavigationLink(destination: NotificationsView()) {
+                        DemoButton(
+                            title: "Notifications Demo",
+                            description: "DeltaList mirrored to the system tray"
+                        )
+                    }
                 }
                 .padding(.horizontal, 24)
 

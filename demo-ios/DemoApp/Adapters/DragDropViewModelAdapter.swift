@@ -27,7 +27,7 @@ class DragDropViewModelAdapter: ObservableObject {
             // Create a collector that updates our items array
             let collector = DeltaItemCollector { [weak self] delta in
                 guard let self = self else { return }
-                self.items = delta.items.compactMap { item -> ItemWrapper? in
+                self.items = delta.loadedItems().compactMap { item -> ItemWrapper? in
                     guard let kotlinItem = item as? Item else { return nil }
                     return ItemWrapper(kotlinItem: kotlinItem)
                 }

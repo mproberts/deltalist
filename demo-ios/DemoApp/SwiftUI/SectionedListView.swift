@@ -1,18 +1,24 @@
 import SwiftUI
 import DemoCore
+import DeltaListCore
 
 /// Sectioned list demo screen with headers and items.
-/// Uses Kotlin ViewModel directly with a simple observer for flow collection.
+/// Uses the Kotlin ViewModel directly with the consolidated SectionedDeltaList wrapper.
 struct SectionedListView: View {
     // Use Kotlin ViewModel directly - no adapter needed!
     private let viewModel = SectionedListViewModel()
 
-    // Simple observer for flow collection
-    @StateObject private var sectionsObserver = SectionsObserver()
+    // Consolidated DeltaListCore wrapper; extracts via accessor methods (never touches
+    // delta.sections) and is collected by `.task` below.
+    @StateObject private var sectionList = DeltaListCore.SectionedDeltaList<SectionHeader, Item>()
 
     @State private var selectedTab = 0
     @State private var selectedSectionIndex: Int? = nil
     @State private var selectedItemIndex: Int? = nil
+
+    private var sections: [ItemSectionWrapper] {
+        sectionList.sections.map { ItemSectionWrapper(header: $0.header, items: $0.items) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,62 +34,22 @@ struct SectionedListView: View {
             if selectedTab == 0 {
                 SectionedSwiftUIContent(
                     viewModel: viewModel,
-                    sections: sectionsObserver.sections,
+                    sections: sections,
                     selectedSectionIndex: $selectedSectionIndex,
                     selectedItemIndex: $selectedItemIndex
                 )
             } else {
                 SectionedUIKitContent(
                     viewModel: viewModel,
-                    sections: sectionsObserver.sections
+                    sections: sections
                 )
             }
         }
         .navigationTitle("Sectioned List")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear {
-            sectionsObserver.bind(to: viewModel.sections)
+        .task {
+            await sectionList.collect(viewModel.sections)
         }
-        .onDisappear {
-            sectionsObserver.unbind()
-        }
-    }
-}
-
-// MARK: - Sections Observer
-
-/// Simple observer for sectioned list flow collection.
-@MainActor
-class SectionsObserver: ObservableObject {
-    @Published private(set) var sections: [ItemSectionWrapper] = []
-
-    private var task: Task<Void, Never>?
-
-    func bind(to flow: some AsyncSequence) {
-        unbind()
-        task = Task { @MainActor [weak self] in
-            do {
-                for try await delta in flow {
-                    if Task.isCancelled { break }
-                    guard let self = self else { break }
-                    // Extract sections from SectionedDelta
-                    if let sectionedDelta = delta as? SectionedDelta<SectionHeader, Item> {
-                        self.sections = sectionedDelta.sections.compactMap { section in
-                            ItemSectionWrapper(kotlinSection: section)
-                        }
-                    }
-                }
-            } catch {}
-        }
-    }
-
-    func unbind() {
-        task?.cancel()
-        task = nil
-    }
-
-    deinit {
-        task?.cancel()
     }
 }
 

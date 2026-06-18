@@ -54,6 +54,10 @@ public struct ItemState<Value>: DynamicProperty {
 public class ItemStateObserver<Value>: ObservableObject {
     @Published public private(set) var value: Value
 
+    /// Invoked if the observed flow terminates with an error. Defaults to nil (silent);
+    /// set it to route upstream failures to telemetry.
+    public var onError: ((Error) -> Void)?
+
     private var task: Task<Void, Never>?
     private var startFlow: (() -> Void)?
     private var isStarted = false
@@ -74,7 +78,9 @@ public class ItemStateObserver<Value>: ObservableObject {
                             self.value = v
                         }
                     }
-                } catch {}
+                } catch {
+                    self.onError?(error)
+                }
             }
         }
         start()

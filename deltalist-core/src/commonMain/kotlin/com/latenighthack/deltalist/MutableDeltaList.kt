@@ -24,12 +24,12 @@ interface MutableDeltaList<T> : Flow<Delta<T>> {
 internal class MutableDeltaListImpl<T>(
     initial: List<T>
 ) : MutableDeltaList<T> {
-    private val state = MutableStateFlow(Delta(initial, Change.Reload))
+    private val state = MutableStateFlow(Delta(initial.asSoftList(), Change.Reload))
 
-    override val value: List<T> get() = state.value.items
+    override val value: List<T> get() = state.value.items.softLoadedItems()
 
     override fun update(block: (MutableList<T>) -> Unit) {
-        val tracked = TrackedMutableList(state.value.items)
+        val tracked = TrackedMutableList(state.value.items.softLoadedItems())
         block(tracked)
 
         val mutations = tracked.toMutations()
@@ -37,11 +37,11 @@ internal class MutableDeltaListImpl<T>(
             return
         }
 
-        state.value = Delta(tracked.toList(), Change.Mutations(mutations))
+        state.value = Delta(tracked.toList().asSoftList(), Change.Mutations(mutations))
     }
 
     override fun reload(items: List<T>) {
-        state.value = Delta(items, Change.Reload)
+        state.value = Delta(items.asSoftList(), Change.Reload)
     }
 
     override fun append(item: T) = update { it.add(item) }
@@ -63,7 +63,7 @@ internal class MutableDeltaListImpl<T>(
     override fun set(index: Int, item: T) = update { it[index] = item }
 
     override fun move(fromIndex: Int, toIndex: Int) {
-        val tracked = TrackedMutableList(state.value.items)
+        val tracked = TrackedMutableList(state.value.items.softLoadedItems())
         tracked.move(fromIndex, toIndex)
 
         val mutations = tracked.toMutations()
@@ -71,7 +71,7 @@ internal class MutableDeltaListImpl<T>(
             return
         }
 
-        state.value = Delta(tracked.toList(), Change.Mutations(mutations))
+        state.value = Delta(tracked.toList().asSoftList(), Change.Mutations(mutations))
     }
 
     override fun clear() = update { it.clear() }

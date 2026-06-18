@@ -1,5 +1,20 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.*
+
+import com.latenighthack.deltalist.get
+import com.latenighthack.deltalist.toList
+import com.latenighthack.deltalist.iterator
+import com.latenighthack.deltalist.isEmpty
+import com.latenighthack.deltalist.isNotEmpty
+import com.latenighthack.deltalist.indices
+import com.latenighthack.deltalist.map
+import com.latenighthack.deltalist.filter
+import com.latenighthack.deltalist.forEach
+import com.latenighthack.deltalist.first
+import com.latenighthack.deltalist.last
+import com.latenighthack.deltalist.contains
+import com.latenighthack.deltalist.AbstractSoftList
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.LazyList
@@ -34,21 +49,11 @@ class MapSoftListTest {
         private val loadedItems: List<T>,
         private val estimatedTotal: Int,
         private val onFetch: (Int) -> Unit = {}
-    ) : AbstractList<T>(), SoftList<T> {
+    ) : AbstractSoftList<T>() {
 
         val fetchRequests = mutableListOf<Int>()
 
         override val size: Int = estimatedTotal
-
-        override fun get(index: Int): T {
-            if (index < 0) throw IndexOutOfBoundsException("Index $index is negative")
-            if (index >= loadedItems.size) {
-                fetchRequests.add(index)
-                onFetch(index)
-                throw IndexOutOfBoundsException("Index $index beyond loaded (${loadedItems.size})")
-            }
-            return loadedItems[index]
-        }
 
         override fun softGet(index: Int): SoftValue<T>? {
             if (index < 0 || index >= size) return null
@@ -201,16 +206,14 @@ class MapSoftListTest {
 
         delay(50)
 
-        // Access unloaded item via get() - should throw but trigger fetch
-        try {
-            results[0].items[50]
-        } catch (_: IndexOutOfBoundsException) {}
+        // Request the unloaded placeholder - should trigger a fetch on the source.
+        (results[0].items.softGet(50) as? SoftValue.NotLoaded)?.request()
 
         delay(50)
         job.cancel()
 
         // Should have recorded a fetch request
-        assertTrue(mockList.fetchRequests.contains(50), "get() should trigger fetch on source")
+        assertTrue(mockList.fetchRequests.contains(50), "request() should trigger fetch on source")
     }
 
     @Test
@@ -458,15 +461,5 @@ class MapSoftListTest {
         // Unloaded items still NotLoaded
         val soft50 = results[0].items.softGetOrNull(50)
         assertTrue((soft50 is SoftValue.NotLoaded))
-    }
-}
-
-// Extension for test readability
-private fun <T> List<T>.softGetOrNull(index: Int): SoftValue<T>? {
-    return if (this is SoftList<T>) {
-        softGet(index)
-    } else {
-        if (index < 0 || index >= size) null
-        else SoftValue.Present(get(index))
     }
 }

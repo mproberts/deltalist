@@ -119,20 +119,15 @@ struct ItemSectionWrapper: Identifiable {
     let header: SectionHeaderWrapper
     var items: [ItemWrapper]
 
-    init?(kotlinSection: Any) {
-        guard let section = kotlinSection as? DemoCore.Section<SectionHeader, Item>,
-              let header = section.header else {
-            return nil
-        }
+    /// Builds the display wrapper from the raw Kotlin header + items already extracted by
+    /// `SectionedDeltaList` via its accessor methods (so the backing list is never bridged).
+    init(header: SectionHeader, items: [Item]) {
         self.header = SectionHeaderWrapper(kotlinHeader: header)
         self.id = self.header.id
-        self.items = section.items.compactMap { item -> ItemWrapper? in
-            guard let kotlinItem = item as? Item else { return nil }
-            return ItemWrapper(kotlinItem: kotlinItem)
-        }
+        self.items = items.map { ItemWrapper(kotlinItem: $0) }
     }
 }
 
 // NOTE: TickingItemWrapper has been removed.
-// BasicListView now uses @DeltaState and @ItemState from DeltaListCore directly,
+// BasicListView now uses DeltaList and @ItemState from DeltaListCore directly,
 // eliminating the need for wrapper classes.

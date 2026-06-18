@@ -1,12 +1,24 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.*
+
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.Mutation
 import com.latenighthack.deltalist.StableItem
+import com.latenighthack.deltalist.get
+import com.latenighthack.deltalist.toList
+import com.latenighthack.deltalist.iterator
+import com.latenighthack.deltalist.isEmpty
+import com.latenighthack.deltalist.isNotEmpty
+import com.latenighthack.deltalist.indices
+import com.latenighthack.deltalist.map
+import com.latenighthack.deltalist.filter
+import com.latenighthack.deltalist.forEach
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 
 class StableIdsTest {
 
@@ -276,5 +288,40 @@ class StableIdsTest {
 
         assertEquals(0, result.items[0].stableId) // A
         assertEquals(4, result.items[1].stableId) // E keeps its ID
+    }
+
+    @Test
+    fun `out-of-range mutation falls back to reload instead of throwing`() {
+        val adapter = StableIdAdapter<String>()
+        adapter.applyDelta(Delta(listOf("A", "B"), Change.Reload))
+
+        // A desynced mutation (removing index 5 of a 2-element mapping) must not throw;
+        // it degrades to a Reload with a mapping consistent with the new items.
+        val delta = Delta(
+            listOf("A", "B", "C"),
+            Change.Mutations(Mutation.Remove(index = 5, count = 1))
+        )
+        val result = adapter.applyDelta(delta)
+
+        assertTrue(result.change is Change.Reload)
+        assertEquals(3, result.items.size)
+        // ids unique and consistent with the regenerated mapping
+        assertEquals(3, result.items.map { it.stableId }.toSet().size)
+    }
+
+    @Test
+    fun `mutation that leaves mapping size mismatched falls back to reload`() {
+        val adapter = StableIdAdapter<String>()
+        adapter.applyDelta(Delta(listOf("A", "B"), Change.Reload))
+
+        // Mutations imply size 2 but the new snapshot has size 3 -> desync -> Reload.
+        val delta = Delta(
+            listOf("A", "B", "C"),
+            Change.Mutations(Mutation.Update(index = 0, count = 1))
+        )
+        val result = adapter.applyDelta(delta)
+
+        assertTrue(result.change is Change.Reload)
+        assertEquals(3, result.items.size)
     }
 }

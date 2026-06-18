@@ -1,5 +1,19 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.*
+
+import com.latenighthack.deltalist.get
+import com.latenighthack.deltalist.toList
+import com.latenighthack.deltalist.iterator
+import com.latenighthack.deltalist.isEmpty
+import com.latenighthack.deltalist.isNotEmpty
+import com.latenighthack.deltalist.indices
+import com.latenighthack.deltalist.map
+import com.latenighthack.deltalist.filter
+import com.latenighthack.deltalist.forEach
+import com.latenighthack.deltalist.first
+import com.latenighthack.deltalist.last
+import com.latenighthack.deltalist.contains
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.Mutation
@@ -29,7 +43,7 @@ class DiffTest {
         job.cancel()
 
         assertEquals(1, results.size)
-        assertEquals(listOf(Item("1", "A"), Item("2", "B")), results[0].items)
+        assertEquals(listOf(Item("1", "A"), Item("2", "B")), results[0].items.toList())
         assertTrue(results[0].change is Change.Reload)
     }
 
@@ -334,7 +348,7 @@ class DiffTest {
             Item("E", "Echo"),
             Item("C", "Charlie-Updated"),
             Item("A", "Alpha")
-        ), results[1].items)
+        ), results[1].items.toList())
     }
 
     @Test

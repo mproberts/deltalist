@@ -1,5 +1,20 @@
 package com.latenighthack.deltalist.operators
 
+import com.latenighthack.deltalist.*
+
+import com.latenighthack.deltalist.get
+import com.latenighthack.deltalist.toList
+import com.latenighthack.deltalist.iterator
+import com.latenighthack.deltalist.isEmpty
+import com.latenighthack.deltalist.isNotEmpty
+import com.latenighthack.deltalist.indices
+import com.latenighthack.deltalist.map
+import com.latenighthack.deltalist.filter
+import com.latenighthack.deltalist.forEach
+import com.latenighthack.deltalist.first
+import com.latenighthack.deltalist.last
+import com.latenighthack.deltalist.contains
+import com.latenighthack.deltalist.AbstractSoftList
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.Mutation
@@ -31,21 +46,11 @@ class FilterCascadeFetchTest {
         private var loadedItems: List<T>,
         private val allItems: List<T>,
         private val onFetch: (Int) -> Unit = {}
-    ) : AbstractList<T>(), SoftList<T> {
+    ) : AbstractSoftList<T>() {
 
         val fetchRequests = mutableListOf<Int>()
 
         override val size: Int = allItems.size
-
-        override fun get(index: Int): T {
-            if (index < 0) throw IndexOutOfBoundsException("Index $index is negative")
-            if (index >= loadedItems.size) {
-                fetchRequests.add(index)
-                onFetch(index)
-                throw IndexOutOfBoundsException("Index $index beyond loaded (${loadedItems.size})")
-            }
-            return loadedItems[index]
-        }
 
         override fun softGet(index: Int): SoftValue<T>? {
             if (index < 0 || index >= size) return null
@@ -105,9 +110,7 @@ class FilterCascadeFetchTest {
 
         // Access filtered index 10 (beyond loaded 5)
         // This should trigger a fetch on the source
-        try {
-            results[0].items[10]
-        } catch (_: IndexOutOfBoundsException) {}
+        (results[0].items.softGet(10) as? SoftValue.NotLoaded)?.request()
 
         delay(50)
         job.cancel()
@@ -361,9 +364,7 @@ class FilterCascadeFetchTest {
         delay(50)
 
         // Access filtered index beyond loaded
-        try {
-            results[0].items[10]
-        } catch (_: IndexOutOfBoundsException) {}
+        (results[0].items.softGet(10) as? SoftValue.NotLoaded)?.request()
 
         delay(50)
         job.cancel()
@@ -405,15 +406,5 @@ class FilterCascadeFetchTest {
 
         // But should indicate NotLoaded
         assertTrue(soft is SoftValue.NotLoaded, "softGet should return NotLoaded for unloaded index")
-    }
-}
-
-// Extension for test readability
-private fun <T> List<T>.softGetOrNull(index: Int): SoftValue<T>? {
-    return if (this is SoftList<T>) {
-        softGet(index)
-    } else {
-        if (index < 0 || index >= size) null
-        else SoftValue.Present(get(index))
     }
 }

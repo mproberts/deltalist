@@ -3,8 +3,11 @@ package com.latenighthack.deltalist.operators
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
+import com.latenighthack.deltalist.AbstractSoftList
 import com.latenighthack.deltalist.LazyList
 import com.latenighthack.deltalist.Mutation
+import com.latenighthack.deltalist.SoftList
+import com.latenighthack.deltalist.SoftValue
 import com.latenighthack.deltalist.StableItem
 import com.latenighthack.deltalist.StableItemImpl
 import kotlinx.coroutines.flow.flow
@@ -57,13 +60,19 @@ fun <T> DeltaList<T>.withStableIds(): DeltaList<StableItem<T>> = flow {
  * Uses idMapping.size as the source of truth to ensure consistency between size and get().
  */
 internal class StableItemList<T>(
-    private val source: List<T>,
+    private val source: SoftList<T>,
     private val idMapping: List<Int>
-) : AbstractList<StableItem<T>>() {
+) : AbstractSoftList<StableItem<T>>() {
     override val size: Int get() = idMapping.size
 
-    override fun get(index: Int): StableItem<T> =
-        StableItemImpl(idMapping[index], source[index])
+    override fun softGet(index: Int): SoftValue<StableItem<T>>? {
+        if (index < 0 || index >= size) return null
+        return when (val s = source.softGet(index)) {
+            is SoftValue.Present -> SoftValue.Present(StableItemImpl(idMapping[index], s.value))
+            is SoftValue.NotLoaded -> s
+            null -> null
+        }
+    }
 }
 
 /**
@@ -73,12 +82,23 @@ internal class StableItemList<T>(
 internal class StableItemLazyList<T>(
     private val source: LazyList<T>,
     private val idMapping: List<Int>
-) : AbstractList<StableItem<T>>(), LazyList<StableItem<T>> {
+) : AbstractSoftList<StableItem<T>>(), LazyList<StableItem<T>> {
     override val size: Int get() = idMapping.size
 
-    override fun get(index: Int): StableItem<T> {
-        // Accessing source[index] auto-acquires the item in the underlying LazyList
-        return StableItemImpl(idMapping[index], source[index])
+    override fun acquire(index: Int): SoftValue<StableItem<T>> {
+        return when (val s = source.acquire(index)) {
+            is SoftValue.Present -> SoftValue.Present(StableItemImpl(idMapping[index], s.value))
+            is SoftValue.NotLoaded -> s
+        }
+    }
+
+    override fun softGet(index: Int): SoftValue<StableItem<T>>? {
+        if (index < 0 || index >= size) return null
+        return when (val s = source.softGet(index)) {
+            is SoftValue.Present -> SoftValue.Present(StableItemImpl(idMapping[index], s.value))
+            is SoftValue.NotLoaded -> s
+            null -> null
+        }
     }
 
     override fun release(index: Int) {
@@ -104,65 +124,85 @@ internal class StableItemLazyList<T>(
  * Automatically detects if the source is a [LazyList] and preserves lazy semantics.
  */
 internal class StableIdAdapter<T> {
+    // Session-unique, monotonically increasing ids (kept stable across reloads so the
+    // platform bindings never reuse a key for a different item). Stays Int because the
+    // iOS binding keys NSDiffableDataSource on Int32; overflow needs ~2.1B inserts in a
+    // single session, which is not a practical concern for a UI list.
     private var nextId = 0
-    // Sparse array: index -> stableId
+    // index -> stableId
     private var idMapping = mutableListOf<Int>()
 
     fun applyDelta(delta: Delta<T>): Delta<StableItem<T>> {
-        // If idMapping is empty, we can't apply mutations - treat as Reload
-        val effectiveChange = if (idMapping.isEmpty() && delta.change !is Change.Reload) {
-            Change.Reload
+        val newSize = delta.items.size
+        val change = delta.change
+
+        val effectiveChange: Change = when {
+            change is Change.Mutations && idMapping.isNotEmpty() -> {
+                // Apply to a copy so a bad (out-of-range) mutation can't corrupt state.
+                val applied = tryApplyMutations(idMapping, change.operations)
+                if (applied != null && applied.size == newSize) {
+                    idMapping = applied
+                    change
+                } else {
+                    // Upstream desync: regenerate ids and surface a Reload instead of
+                    // throwing into the flow (keeps the stream alive).
+                    regenerate(newSize)
+                    Change.Reload
+                }
+            }
+            else -> {
+                // Reload, or Mutations with no baseline to apply against.
+                regenerate(newSize)
+                Change.Reload
+            }
+        }
+
+        // Invariant established above: idMapping.size == delta.items.size, so
+        // StableItemList.get/size can never read source out of range.
+        val items = delta.items
+        val wrappedList: SoftList<StableItem<T>> = if (items is LazyList<*>) {
+            @Suppress("UNCHECKED_CAST")
+            StableItemLazyList(items as LazyList<T>, idMapping.toList())
         } else {
-            delta.change
-        }
-
-        when (effectiveChange) {
-            is Change.Reload -> {
-                // On reload, regenerate all IDs
-                idMapping.clear()
-                repeat(delta.items.size) {
-                    idMapping.add(nextId++)
-                }
-            }
-            is Change.Mutations -> {
-                for (mutation in effectiveChange.operations) {
-                    applyMutation(mutation)
-                }
-            }
-        }
-
-        // Use lazy wrapper list - items are only accessed when get() is called
-        // Detect LazyList source and preserve lazy semantics
-        val wrappedList: List<StableItem<T>> = when (val items = delta.items) {
-            is LazyList<T> -> StableItemLazyList(items, idMapping.toList())
-            else -> StableItemList(items, idMapping.toList())
+            StableItemList(items, idMapping.toList())
         }
 
         return Delta(wrappedList, effectiveChange)
     }
 
-    private fun applyMutation(mutation: Mutation) {
-        when (mutation) {
-            is Mutation.Insert -> {
-                // Insert new IDs at the given position
-                for (i in 0 until mutation.count) {
-                    idMapping.add(mutation.index + i, nextId++)
+    private fun regenerate(size: Int) {
+        // Fresh ids continuing from the session counter (never reused across reloads).
+        idMapping = MutableList(size) { nextId++ }
+    }
+
+    /**
+     * Applies [ops] to a copy of [base], returning the new mapping, or `null` if any
+     * mutation references an out-of-range index (signals an upstream desync).
+     */
+    private fun tryApplyMutations(base: List<Int>, ops: List<Mutation>): MutableList<Int>? {
+        val m = base.toMutableList()
+        for (op in ops) {
+            when (op) {
+                is Mutation.Insert -> {
+                    if (op.count < 0 || op.index < 0 || op.index > m.size) return null
+                    for (i in 0 until op.count) m.add(op.index + i, nextId++)
                 }
-            }
-            is Mutation.Remove -> {
-                // Remove IDs at the given positions
-                for (i in 0 until mutation.count) {
-                    idMapping.removeAt(mutation.index)
+                is Mutation.Remove -> {
+                    if (op.count < 0 || op.index < 0 || op.index + op.count > m.size) return null
+                    repeat(op.count) { m.removeAt(op.index) }
                 }
-            }
-            is Mutation.Update -> {
-                // IDs don't change on update - the item at that position keeps its ID
-            }
-            is Mutation.Move -> {
-                // Move the ID from one position to another
-                val id = idMapping.removeAt(mutation.fromIndex)
-                idMapping.add(mutation.toIndex, id)
+                is Mutation.Update -> {
+                    // IDs are unchanged on update; still range-check to catch desync.
+                    if (op.count < 0 || op.index < 0 || op.index + op.count > m.size) return null
+                }
+                is Mutation.Move -> {
+                    if (op.fromIndex < 0 || op.fromIndex >= m.size) return null
+                    val id = m.removeAt(op.fromIndex)
+                    if (op.toIndex < 0 || op.toIndex > m.size) return null
+                    m.add(op.toIndex, id)
+                }
             }
         }
+        return m
     }
 }

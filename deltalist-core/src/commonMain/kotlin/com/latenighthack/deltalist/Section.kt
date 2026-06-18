@@ -8,5 +8,8 @@ package com.latenighthack.deltalist
  */
 data class Section<out S, out T>(
     val header: S,
-    val items: List<T>
-)
+    val items: SoftList<T>
+) {
+    /** Convenience on-ramp: a plain (fully-loaded) list is wrapped as a [SoftList]. */
+    constructor(header: S, items: List<T>) : this(header, items.asSoftList())
+}

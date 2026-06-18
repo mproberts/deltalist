@@ -8,8 +8,11 @@ import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
 import com.latenighthack.deltalist.LazyList
 import com.latenighthack.deltalist.Mutation
+import com.latenighthack.deltalist.SoftList
 import com.latenighthack.deltalist.SoftValue
 import com.latenighthack.deltalist.StableItem
+import com.latenighthack.deltalist.acquireOrGet
+import com.latenighthack.deltalist.asSoftList
 import com.latenighthack.deltalist.releaseAllIfLazy
 import com.latenighthack.deltalist.releaseIfLazy
 import com.latenighthack.deltalist.softGetOrNull
@@ -71,7 +74,7 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
      *
      * When backed by a [LazyList], accessing items via index will auto-acquire them.
      */
-    protected var items: List<T> = emptyList()
+    protected var items: SoftList<T> = emptyList<T>().asSoftList()
         private set
 
     private var job: Job? = null
@@ -109,11 +112,13 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
     }
 
     private fun applyDelta(delta: Delta<T>) {
+        val previousCount = items.size
         items = delta.items
 
         // Auto-detect stable ID mode on first non-empty delta
-        if (stableIdMode == StableIdMode.Unknown && items.isNotEmpty()) {
-            stableIdMode = when (items.first()) {
+        val firstLoaded = (items.softGet(0) as? SoftValue.Present)?.value
+        if (stableIdMode == StableIdMode.Unknown && firstLoaded != null) {
+            stableIdMode = when (firstLoaded) {
                 is StableItem<*> -> StableIdMode.StableItem
                 else -> StableIdMode.None
             }
@@ -125,20 +130,69 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
         when (val change = delta.change) {
             is Change.Reload -> notifyDataSetChanged()
             is Change.Mutations -> {
-                change.operations.forEach { mutation ->
-                    when (mutation) {
-                        is Mutation.Insert -> notifyItemRangeInserted(mutation.index, mutation.count)
-                        is Mutation.Remove -> notifyItemRangeRemoved(mutation.index, mutation.count)
-                        is Mutation.Update -> notifyItemRangeChanged(mutation.index, mutation.count)
-                        is Mutation.Move -> {
-                            repeat(mutation.count) { i ->
-                                notifyItemMoved(mutation.fromIndex + i, mutation.toIndex + i)
-                            }
+                // Defensive: if the mutation stream is inconsistent with the snapshot's
+                // size change (e.g. an upstream desync), fall back to a full reload
+                // rather than dispatching notifications RecyclerView would reject with
+                // an "Inconsistency detected" crash.
+                if (mutationsAreConsistent(change.operations, previousCount, items.size)) {
+                    change.operations.forEach { mutation ->
+                        when (mutation) {
+                            is Mutation.Insert -> notifyItemRangeInserted(mutation.index, mutation.count)
+                            is Mutation.Remove -> notifyItemRangeRemoved(mutation.index, mutation.count)
+                            is Mutation.Update -> notifyItemRangeChanged(mutation.index, mutation.count)
+                            // Moves are single-item per the Change contract (see applyChange).
+                            is Mutation.Move -> notifyItemMoved(mutation.fromIndex, mutation.toIndex)
                         }
                     }
+                } else {
+                    notifyDataSetChanged()
                 }
             }
         }
+
+        onItemsChanged()
+    }
+
+    /**
+     * Called after each delta has been applied and its RecyclerView notifications dispatched.
+     * Override to react to content/size changes (e.g. update a header count). The current item
+     * count — including unloaded placeholders for paginated lists — is [getItemCount].
+     */
+    protected open fun onItemsChanged() {}
+
+    /**
+     * Simulates the running item count through [operations] (the same sequential,
+     * running-index semantics the appliers use), bounds-checking each step. Returns
+     * true only if every operation is in range and the final count equals [endCount].
+     */
+    private fun mutationsAreConsistent(
+        operations: List<Mutation>,
+        startCount: Int,
+        endCount: Int
+    ): Boolean {
+        var count = startCount
+        for (op in operations) {
+            when (op) {
+                is Mutation.Insert -> {
+                    if (op.count < 0 || op.index < 0 || op.index > count) return false
+                    count += op.count
+                }
+                is Mutation.Remove -> {
+                    if (op.count < 0 || op.index < 0 || op.index + op.count > count) return false
+                    count -= op.count
+                }
+                is Mutation.Update -> {
+                    if (op.count < 0 || op.index < 0 || op.index + op.count > count) return false
+                }
+                is Mutation.Move -> {
+                    // Single-item move in running coordinates; count is unchanged.
+                    if (op.count != 1) return false
+                    if (op.fromIndex < 0 || op.fromIndex >= count) return false
+                    if (op.toIndex < 0 || op.toIndex >= count) return false
+                }
+            }
+        }
+        return count == endCount
     }
 
     override fun getItemCount(): Int = items.size
@@ -150,10 +204,15 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
      *
      * When backed by a [LazyList], this will auto-acquire the item if not already cached.
      *
-     * Note: For paginated lists, this may trigger a fetch for unloaded items.
-     * Use [softGetItem] if you need to check loading state without side effects.
+     * Note: this does NOT trigger pagination fetches. For a paginated/soft list, accessing an
+     * unloaded position throws [IndexOutOfBoundsException]. To drive pagination, read the position
+     * with [softGetItem] and call [SoftValue.NotLoaded.request] on the placeholder (typically when
+     * binding a loading view holder).
      */
-    fun getItem(position: Int): T = items[position]
+    fun getItem(position: Int): T = when (val v = items.acquireOrGet(position)) {
+        is SoftValue.Present -> v.value
+        is SoftValue.NotLoaded -> throw IndexOutOfBoundsException("Item at $position is not loaded")
+    }
 
     /**
      * Returns the item at the given position as a [SoftValue] without triggering side effects.
@@ -180,7 +239,9 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
      */
     override fun getItemId(position: Int): Long {
         return when (stableIdMode) {
-            StableIdMode.StableItem -> (items[position] as StableItem<*>).stableId.toLong()
+            StableIdMode.StableItem ->
+                ((items.softGet(position) as? SoftValue.Present)?.value as? StableItem<*>)
+                    ?.stableId?.toLong() ?: RecyclerView.NO_ID
             else -> RecyclerView.NO_ID
         }
     }

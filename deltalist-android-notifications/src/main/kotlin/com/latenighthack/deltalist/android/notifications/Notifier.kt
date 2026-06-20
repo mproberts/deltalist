@@ -8,17 +8,18 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import com.latenighthack.deltalist.Delta
 import com.latenighthack.deltalist.DeltaList
+import com.latenighthack.deltalist.Stable
 import com.latenighthack.deltalist.StableItem
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
 /**
- * Binds this [DeltaList] of stably-identified items to system-tray notifications.
+ * Binds this [DeltaList] of [StableItem]-wrapped items to system-tray notifications.
  *
- * Items must be [StableItem] (call `.withStableIds()`) because a notification's identity is
- * an `Int` id that must follow an item across mutations. The returned notifier is unbound;
- * call [DeltaNotifier.bind] to start syncing the tray.
+ * Use this overload when ids are synthesized by `.withStableIds()`; the notification payload
+ * is each item's [StableItem.value]. The returned notifier is unbound; call
+ * [DeltaNotifier.bind] to start syncing the tray.
  *
  * ```kotlin
  * val notifier = downloads.withStableIds().notifier(context) {
@@ -30,19 +31,50 @@ import kotlinx.coroutines.launch
  */
 fun <T> DeltaList<StableItem<T>>.notifier(
     context: Context,
-    build: NotifierBuilder<T>.() -> Unit,
-): DeltaNotifier<T> {
+    build: NotifierBuilder<StableItem<T>, T>.() -> Unit,
+): DeltaNotifier<StableItem<T>, T> {
     val appContext = context.applicationContext
-    val builder = NotifierBuilder<T>().apply(build)
-    return DeltaNotifier(appContext, this, builder.toConfig(), builder.toOptions())
+    val builder = NotifierBuilder<StableItem<T>, T>().apply(build)
+    return DeltaNotifier(appContext, this, builder.toConfig(), builder.toOptions(), builder.toSummary(), valueOf = { it.value })
 }
 
-/** DSL for configuring a [DeltaNotifier]. */
-class NotifierBuilder<T> internal constructor() {
+/**
+ * Binds this [DeltaList] of self-identifying items to system-tray notifications.
+ *
+ * Use this when the item type already implements [Stable]; the item itself is the
+ * notification payload, so no `.withStableIds()` wrapping is needed. (It has a distinct name
+ * from [notifier] only because, under an invariant `Delta`, the two cannot be disambiguated
+ * by overload resolution for `StableItem` inputs.)
+ *
+ * ```kotlin
+ * data class Download(override val stableId: Int, val name: String) : Stable
+ * val notifier = downloads.notifierForStable(context) {
+ *     channel("downloads", "Downloads")
+ *     content { dl -> notification { setContentTitle(dl.name) } }
+ * }.bind(lifecycleOwner)
+ * ```
+ */
+fun <T : Stable> DeltaList<T>.notifierForStable(
+    context: Context,
+    build: NotifierBuilder<T, T>.() -> Unit,
+): DeltaNotifier<T, T> {
+    val appContext = context.applicationContext
+    val builder = NotifierBuilder<T, T>().apply(build)
+    return DeltaNotifier(appContext, this, builder.toConfig(), builder.toOptions(), builder.toSummary(), valueOf = { it })
+}
+
+/**
+ * DSL for configuring a [DeltaNotifier].
+ *
+ * @param E the list element type (a [StableItem] wrapper or a self-identifying [Stable] type).
+ * @param T the notification payload type fed to [content] and the interaction handlers.
+ */
+class NotifierBuilder<E : Stable, T> internal constructor() {
     private val channels = mutableListOf<ChannelSpec>()
     private var tag: String = "deltalist"
     private var idBase: Int = 0
-    private var group: GroupSpec<T>? = null
+    private var groupKey: String? = null
+    private var groupSummary: (NotificationSummaryScope.(List<E>) -> Notification)? = null
     private var content: (NotificationScope<T>.(T) -> Notification)? = null
     private var stateAccessor: ((T) -> Flow<Any?>)? = null
     private var stateInitial: ((T) -> Any?)? = null
@@ -73,9 +105,10 @@ class NotifierBuilder<T> internal constructor() {
 
     fun group(
         key: String,
-        summary: (NotificationSummaryScope.(items: List<StableItem<T>>) -> Notification)? = null,
+        summary: (NotificationSummaryScope.(items: List<E>) -> Notification)? = null,
     ) {
-        group = GroupSpec(key, summary)
+        groupKey = key
+        groupSummary = summary
     }
 
     /** Maps each item's value to a notification. Called on insert, update, reload and state change. */
@@ -104,8 +137,10 @@ class NotifierBuilder<T> internal constructor() {
 
     internal fun toConfig(): NotifierConfig<T> {
         val map = content ?: error("notifier { content { ... } } is required")
-        return NotifierConfig(tag, idBase, channels.toList(), map, group, onDismiss, onContentTap, onAction)
+        return NotifierConfig(tag, idBase, channels.toList(), map, groupKey, onDismiss, onContentTap, onAction)
     }
+
+    internal fun toSummary(): (NotificationSummaryScope.(List<E>) -> Notification)? = groupSummary
 
     internal fun toOptions(): NotifierOptions<T> =
         NotifierOptions(cancelOnUnbind, rateLimitPerSecond, stateAccessor, stateInitial)
@@ -118,17 +153,12 @@ internal class ChannelSpec(
     val configure: NotificationChannelCompat.Builder.() -> Unit,
 )
 
-internal class GroupSpec<T>(
-    val key: String,
-    val summary: (NotificationSummaryScope.(List<StableItem<T>>) -> Notification)?,
-)
-
 internal class NotifierConfig<T>(
     val tag: String,
     val idBase: Int,
     val channels: List<ChannelSpec>,
     val content: NotificationScope<T>.(T) -> Notification,
-    val group: GroupSpec<T>?,
+    val groupKey: String?,
     val onDismiss: ((T) -> Unit)?,
     val onContentTap: ((T) -> Unit)?,
     val onAction: ((T, String) -> Unit)?,
@@ -153,19 +183,21 @@ internal class NotifierOptions<T>(
  * [cancelAll] for deterministic teardown). Interactions keep working after unbind because the
  * back-channel runs through durable PendingIntents to [DeltaNotificationReceiver].
  */
-class DeltaNotifier<T> internal constructor(
+class DeltaNotifier<E : Stable, T> internal constructor(
     context: Context,
-    private val deltaList: DeltaList<StableItem<T>>,
+    private val deltaList: DeltaList<E>,
     private val config: NotifierConfig<T>,
     private val options: NotifierOptions<T>,
+    summary: (NotificationSummaryScope.(List<E>) -> Notification)?,
+    private val valueOf: (E) -> T,
 ) {
-    private val sink: NotificationSink<T> = ManagerNotificationSink(context, config)
-    private val grouped: Boolean = config.group?.summary != null
+    private val sink: NotificationSink<E, T> = ManagerNotificationSink(context, config, summary)
+    private val grouped: Boolean = summary != null
 
-    private var controller: TrayController<T>? = null
+    private var controller: TrayController<E, T>? = null
     private var job: Job? = null
 
-    fun bind(owner: LifecycleOwner): DeltaNotifier<T> {
+    fun bind(owner: LifecycleOwner): DeltaNotifier<E, T> {
         unbind()
         val scope = owner.lifecycleScope
         val controller = TrayController(
@@ -175,11 +207,12 @@ class DeltaNotifier<T> internal constructor(
             stateAccessor = options.stateAccessor,
             stateInitial = options.stateInitial,
             rateLimitPerSecond = options.rateLimitPerSecond,
+            valueOf = valueOf,
         )
         this.controller = controller
         NotifierRegistry.register(config.tag, this)
         job = scope.launch {
-            deltaList.collect { delta: Delta<StableItem<T>> -> controller.applyDelta(delta) }
+            deltaList.collect { delta: Delta<E> -> controller.applyDelta(delta) }
         }
         return this
     }

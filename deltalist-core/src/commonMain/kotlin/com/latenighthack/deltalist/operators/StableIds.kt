@@ -23,7 +23,9 @@ import kotlinx.coroutines.flow.flow
  * - Platform adapters detect [LazyList] and call release() automatically
  *
  * Use this at the boundary between deltalist-core and platform bindings to provide
- * stable keys without requiring the underlying data to implement Identifiable.
+ * stable keys without requiring the underlying data to carry identity. If your type already
+ * implements [com.latenighthack.deltalist.Stable], it satisfies the same binding contract
+ * directly and does not need this operator (and won't get reload-regeneration from it).
  *
  * Example:
  * ```

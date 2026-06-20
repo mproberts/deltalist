@@ -5,10 +5,12 @@ import Combine
 //
 // A `Delta` / `SectionedDelta` vended by a consumer's KMP framework (which exports deltalist-core)
 // is a DISTINCT Obj-C class from this framework's own `Delta` / `SectionedDelta`, so a direct
-// `as? Delta<T>` cast can fail across the framework boundary. These `@objc` protocols (and the
-// runtime-selector helpers below) provide the structural fallback the typed casts can't, mirroring
-// the UIKit data sources in DeltaDataSource.swift. Defined here (not under that file's
-// `#if canImport(UIKit)`) so the SwiftUI wrappers can use them on every Apple platform.
+// `as? Delta<T>` cast fails across the framework boundary. An `as? DeltaProtocol` cast can't bridge
+// that gap either — a Kotlin/Native class never declares conformance to a Swift `@objc` protocol —
+// so the SwiftUI wrappers fall back to the runtime-selector helpers below, invoking the exported
+// Obj-C accessor methods directly. These protocols remain for the typed/same-module path and the
+// UIKit data sources in DeltaDataSource.swift; they are defined here (not under that file's
+// `#if canImport(UIKit)`) so the SwiftUI wrappers can share them on every Apple platform.
 
 /// Structural access to a `Delta` without coupling to its concrete (per-framework) type.
 /// WARNING: never add `items` here — reading it bridges and force-loads the entire backing list.
@@ -101,7 +103,9 @@ public final class DeltaList<T: AnyObject>: ObservableObject {
     public func isLoaded(at index: Int) -> Bool {
         if let delta = currentDelta as? Delta<T> { return delta.isLoadedAt(index: Int32(index)) }
         if let delta = currentDelta as? Delta<AnyObject> { return delta.isLoadedAt(index: Int32(index)) }
-        if let delta = currentDelta as? DeltaProtocol { return delta.isLoadedAt(index: Int32(index)) }
+        if let delta = currentDelta, delta.responds(to: Selector(("isLoadedAtIndex:"))) {
+            return isLoadedAtViaRuntime(delta, index: Int32(index))
+        }
         return index < loadedItems.count
     }
 
@@ -109,7 +113,9 @@ public final class DeltaList<T: AnyObject>: ObservableObject {
     public func loadedItem(at index: Int) -> T? {
         if let delta = currentDelta as? Delta<T> { return delta.getLoadedItemAt(index: Int32(index)) as? T }
         if let delta = currentDelta as? Delta<AnyObject> { return delta.getLoadedItemAt(index: Int32(index)) as? T }
-        if let delta = currentDelta as? DeltaProtocol { return delta.getLoadedItemAt(index: Int32(index)) as? T }
+        if let delta = currentDelta, delta.responds(to: Selector(("getLoadedItemAtIndex:"))) {
+            return loadedItemAtViaRuntime(delta, index: Int32(index)) as? T
+        }
         return index < loadedItems.count ? loadedItems[index] : nil
     }
 
@@ -118,7 +124,9 @@ public final class DeltaList<T: AnyObject>: ObservableObject {
     public func triggerLoad(at index: Int) {
         if let delta = currentDelta as? Delta<T> { delta.triggerLoadAt(index: Int32(index)); return }
         if let delta = currentDelta as? Delta<AnyObject> { delta.triggerLoadAt(index: Int32(index)); return }
-        if let delta = currentDelta as? DeltaProtocol { delta.triggerLoadAt(index: Int32(index)) }
+        if let delta = currentDelta, delta.responds(to: Selector(("triggerLoadAtIndex:"))) {
+            triggerLoadAtViaRuntime(delta, index: Int32(index))
+        }
     }
 
     // MARK: Application
@@ -126,8 +134,10 @@ public final class DeltaList<T: AnyObject>: ObservableObject {
     private func apply(_ value: AnyObject) {
         // Always read through loadedItems()/totalSize(): touching `delta.items` bridges and
         // force-loads the entire backing list, and `as!` crashes on erased/heterogeneous elements.
-        // Cascade mirrors the UIKit data source: same-module cast, SKIE-erased cast, then the
-        // structural `DeltaProtocol` fallback for a consumer framework's own Delta class.
+        // Cascade mirrors the sectioned wrapper: same-module cast, SKIE-erased cast, then
+        // runtime-selector extraction for a consumer framework's own Delta class (a distinct
+        // Obj-C class that the typed casts — and an `as? DeltaProtocol` cast, which a Kotlin
+        // class never satisfies — all miss).
         if let typed = value as? Delta<T> {
             publish(delta: typed,
                     items: typed.loadedItems().compactMap { $0 as? T },
@@ -138,11 +148,11 @@ public final class DeltaList<T: AnyObject>: ObservableObject {
                     items: erased.loadedItems().compactMap { $0 as? T },
                     total: Int(erased.totalSize()),
                     isReload: erased.change is Change.Reload)
-        } else if let proto = value as? DeltaProtocol {
+        } else {
             publish(delta: value,
-                    items: proto.loadedItems().compactMap { $0 as? T },
-                    total: Int(proto.totalSize()),
-                    isReload: proto.change is Change.Reload)
+                    items: loadedItemsViaRuntime(value).compactMap { $0 as? T },
+                    total: totalSizeViaRuntime(value),
+                    isReload: changeViaRuntime(value) is Change.Reload)
         }
     }
 
@@ -298,6 +308,56 @@ public final class SectionedDeltaList<H: AnyObject, T: AnyObject>: ObservableObj
             }
         }
     }
+}
+
+// MARK: - Flat runtime-selector helpers
+//
+// Used when both the same-module and SKIE-erased generic casts fail (a consumer framework's own
+// `Delta` class — a distinct Obj-C class an `as? DeltaProtocol` cast can't reach, since a Kotlin
+// class never declares conformance to a Swift `@objc` protocol). The Kotlin extension accessors
+// are exported as Obj-C instance methods (a `Delta (Extensions)` category), so they can be invoked
+// directly by selector without ever bridging `delta.items`. Mirrors the sectioned helpers below.
+
+private func loadedItemsViaRuntime(_ obj: AnyObject) -> [Any] {
+    typealias Fn = @convention(c) (AnyObject, Selector) -> NSArray?
+    let sel = Selector(("loadedItems"))
+    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return [] }
+    return (unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel) as? [Any]) ?? []
+}
+
+private func totalSizeViaRuntime(_ obj: AnyObject) -> Int {
+    typealias Fn = @convention(c) (AnyObject, Selector) -> Int32
+    let sel = Selector(("totalSize"))
+    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return 0 }
+    return Int(unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel))
+}
+
+private func changeViaRuntime(_ obj: AnyObject) -> AnyObject? {
+    typealias Fn = @convention(c) (AnyObject, Selector) -> AnyObject?
+    let sel = Selector(("change"))
+    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return nil }
+    return unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel)
+}
+
+private func isLoadedAtViaRuntime(_ obj: AnyObject, index: Int32) -> Bool {
+    typealias Fn = @convention(c) (AnyObject, Selector, Int32) -> Bool
+    let sel = Selector(("isLoadedAtIndex:"))
+    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return false }
+    return unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel, index)
+}
+
+private func loadedItemAtViaRuntime(_ obj: AnyObject, index: Int32) -> Any? {
+    typealias Fn = @convention(c) (AnyObject, Selector, Int32) -> AnyObject?
+    let sel = Selector(("getLoadedItemAtIndex:"))
+    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return nil }
+    return unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel, index)
+}
+
+private func triggerLoadAtViaRuntime(_ obj: AnyObject, index: Int32) {
+    typealias Fn = @convention(c) (AnyObject, Selector, Int32) -> Void
+    let sel = Selector(("triggerLoadAtIndex:"))
+    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return }
+    unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel, index)
 }
 
 // MARK: - Sectioned runtime-selector helpers

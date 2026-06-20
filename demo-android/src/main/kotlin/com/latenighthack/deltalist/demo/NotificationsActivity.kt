@@ -33,6 +33,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.latenighthack.deltalist.softLoadedItems
 import com.latenighthack.deltalist.android.compose.collectAsDeltaState
+import com.latenighthack.deltalist.StableItem
 import com.latenighthack.deltalist.android.notifications.DeltaNotifier
 import com.latenighthack.deltalist.android.notifications.notifier
 import com.latenighthack.deltalist.demo.ui.theme.DeltaListDemoTheme
@@ -42,7 +43,7 @@ import kotlinx.coroutines.launch
 class NotificationsActivity : ComponentActivity() {
 
     private val viewModel = NotificationsViewModel()
-    private lateinit var notifier: DeltaNotifier<DownloadVm>
+    private lateinit var notifier: DeltaNotifier<StableItem<DownloadVm>, DownloadVm>
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* result ignored */ }

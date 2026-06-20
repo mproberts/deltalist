@@ -10,6 +10,7 @@ import com.latenighthack.deltalist.LazyList
 import com.latenighthack.deltalist.Mutation
 import com.latenighthack.deltalist.SoftList
 import com.latenighthack.deltalist.SoftValue
+import com.latenighthack.deltalist.Stable
 import com.latenighthack.deltalist.StableItem
 import com.latenighthack.deltalist.acquireOrGet
 import com.latenighthack.deltalist.asSoftList
@@ -82,7 +83,7 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
 
     private enum class StableIdMode {
         Unknown,
-        StableItem,
+        Stable,
         None
     }
 
@@ -119,10 +120,10 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
         val firstLoaded = (items.softGet(0) as? SoftValue.Present)?.value
         if (stableIdMode == StableIdMode.Unknown && firstLoaded != null) {
             stableIdMode = when (firstLoaded) {
-                is StableItem<*> -> StableIdMode.StableItem
+                is Stable -> StableIdMode.Stable
                 else -> StableIdMode.None
             }
-            if (stableIdMode == StableIdMode.StableItem) {
+            if (stableIdMode == StableIdMode.Stable) {
                 setHasStableIds(true)
             }
         }
@@ -233,14 +234,14 @@ abstract class DeltaAdapter<T, VH : RecyclerView.ViewHolder>(
     /**
      * Returns the stable ID for the item at the given position.
      *
-     * When items are [StableItem], this automatically returns their stable ID.
-     * Otherwise, returns [RecyclerView.NO_ID] by default.
+     * When items implement [Stable] (including [StableItem]), this automatically returns their
+     * stable ID. Otherwise, returns [RecyclerView.NO_ID] by default.
      * Override this method if you need custom stable ID logic.
      */
     override fun getItemId(position: Int): Long {
         return when (stableIdMode) {
-            StableIdMode.StableItem ->
-                ((items.softGet(position) as? SoftValue.Present)?.value as? StableItem<*>)
+            StableIdMode.Stable ->
+                ((items.softGet(position) as? SoftValue.Present)?.value as? Stable)
                     ?.stableId?.toLong() ?: RecyclerView.NO_ID
             else -> RecyclerView.NO_ID
         }

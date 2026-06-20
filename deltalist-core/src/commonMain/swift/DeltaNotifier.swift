@@ -343,6 +343,11 @@ public final class DeltaNotifier<T: AnyObject> {
 
     private var controller: TrayController?
     private var task: Task<Void, Never>?
+    // Retains the production sink for the notifier's lifetime. The TrayController only holds the
+    // erased `NotificationSink`, whose closures reference this object weakly, so without a strong
+    // reference here the sink would deallocate as soon as `start()` returns and every post/cancel
+    // would silently become a no-op.
+    private var sink: CenterNotificationSink?
 
     public init(
         tag: String,
@@ -446,7 +451,20 @@ public final class DeltaNotifier<T: AnyObject> {
             do {
                 for try await value in stream {
                     if Task.isCancelled || self == nil { break }
-                    applyErasedDelta(value as AnyObject, to: controller)
+                    let object = value as AnyObject
+                    // The concrete-typed `Delta<T>` cast is the fast path when the delta is vended by
+                    // this same framework. A delta from a *different* SKIE framework (e.g. the app's
+                    // own KMP framework exporting deltalist-core) is a distinct Obj-C class that none
+                    // of the typed/protocol casts match, so applyErasedDelta falls back to runtime
+                    // selectors. Mirrors the cascade in DeltaDataSource/DeltaList's bind(erased:).
+                    if let typed = object as? Delta<T> {
+                        controller.applyDelta(
+                            items: typed.loadedItems().map { $0 as AnyObject },
+                            isReload: typed.change is Change.Reload
+                        )
+                    } else {
+                        applyErasedDelta(object, to: controller)
+                    }
                 }
             } catch {}
         }
@@ -507,6 +525,7 @@ public final class DeltaNotifier<T: AnyObject> {
                 return content(scope)
             }
         )
+        self.sink = sink
 
         let shouldRepost = self.shouldRepost
         let stateInitial = self.stateInitial
@@ -537,7 +556,37 @@ private func applyErasedDelta(_ value: AnyObject, to controller: TrayController)
     } else if let delta = value as? DeltaProtocol {
         controller.applyDelta(items: delta.loadedItems().map { $0 as AnyObject },
                               isReload: delta.change is Change.Reload)
+    } else if value.responds(to: Selector(("loadedItems"))) {
+        // A Delta vended by a *different* SKIE framework (e.g. the app's own KMP framework exporting
+        // deltalist-core) is a DISTINCT Obj-C class, and the @objc DeltaProtocol is module-qualified,
+        // so neither the typed casts nor the protocol cast match it. Call the exported Kotlin
+        // accessors directly by selector — the same runtime-selector mechanism the sectioned data
+        // source uses in DeltaList.swift, and the only thing that crosses the framework boundary.
+        controller.applyDelta(items: loadedItemsViaRuntime(value),
+                              isReload: changeIsReloadViaRuntime(value))
     }
+}
+
+/// Calls the exported Kotlin `Delta.loadedItems()` by selector, so a Delta from any SKIE framework
+/// (not just this one) can be read without bridging its backing list. Returns [] if unavailable.
+@available(iOS 14.0, *)
+private func loadedItemsViaRuntime(_ obj: AnyObject) -> [AnyObject] {
+    typealias Fn = @convention(c) (AnyObject, Selector) -> AnyObject?
+    let sel = Selector(("loadedItems"))
+    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return [] }
+    let result = unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel)
+    return (result as? [AnyObject]) ?? []
+}
+
+/// Detects whether a cross-framework Delta's `change` is a `Reload` by Obj-C class name (a direct
+/// `is Change.Reload` cast fails across frameworks). Non-reload is the safe default.
+@available(iOS 14.0, *)
+private func changeIsReloadViaRuntime(_ obj: AnyObject) -> Bool {
+    typealias Fn = @convention(c) (AnyObject, Selector) -> AnyObject?
+    let sel = Selector(("change"))
+    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return false }
+    guard let change = unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel) else { return false }
+    return String(describing: type(of: change)).contains("ChangeReload")
 }
 
 // MARK: - Router

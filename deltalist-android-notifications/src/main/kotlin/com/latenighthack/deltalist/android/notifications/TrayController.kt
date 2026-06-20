@@ -2,7 +2,7 @@ package com.latenighthack.deltalist.android.notifications
 
 import com.latenighthack.deltalist.Change
 import com.latenighthack.deltalist.Delta
-import com.latenighthack.deltalist.StableItem
+import com.latenighthack.deltalist.Stable
 import com.latenighthack.deltalist.softLoadedItems
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
@@ -16,7 +16,7 @@ import kotlinx.coroutines.launch
  * [NotificationSink]. This is the only piece of stateful sequencing logic, and it is pure
  * Kotlin (no Android types) so it can be unit-tested directly.
  *
- * Reconciliation is keyed on [StableItem.stableId] rather than the raw mutation indices.
+ * Reconciliation is keyed on [Stable.stableId] rather than the raw mutation indices.
  * This yields the same observable tray result as a positional translation (Insert -> post,
  * Update -> re-post same id, Remove -> cancel, Move -> no-op, Reload -> diff) while being
  * robust to multiple mutations batched in a single [Change.Mutations]:
@@ -29,13 +29,14 @@ import kotlinx.coroutines.launch
  * a Reload degrades to cancel-old + post-new (a brief tray refresh) rather than in-place
  * updates — an accepted limitation of using session-stable ids as the tray identity.
  */
-internal class TrayController<T>(
+internal class TrayController<E : Stable, T>(
     private val scope: CoroutineScope,
-    private val sink: NotificationSink<T>,
+    private val sink: NotificationSink<E, T>,
     private val grouped: Boolean,
     private val stateAccessor: ((T) -> Flow<Any?>)?,
     private val stateInitial: ((T) -> Any?)?,
     rateLimitPerSecond: Int,
+    private val valueOf: (E) -> T,
 ) {
     private class Entry<T>(
         val stableId: Int,
@@ -51,7 +52,7 @@ internal class TrayController<T>(
 
     fun valueFor(stableId: Int): T? = entries[stableId]?.value
 
-    fun applyDelta(delta: Delta<StableItem<T>>) {
+    fun applyDelta(delta: Delta<E>) {
         val forceRepost = delta.change is Change.Reload
         // The notification tray needs every item; notifications are fully loaded, so
         // materialize the soft snapshot's loaded items into an ordinary list.
@@ -76,16 +77,17 @@ internal class TrayController<T>(
         val rebuilt = LinkedHashMap<Int, Entry<T>>(newItems.size)
         for (item in newItems) {
             val id = item.stableId
+            val value = valueOf(item)
             val existing = entries[id]
             if (existing == null) {
-                val entry = Entry(id, item.value, stateInitial?.invoke(item.value), null)
+                val entry = Entry(id, value, stateInitial?.invoke(value), null)
                 rebuilt[id] = entry
                 sink.post(id, entry.value, entry.state)
                 startStateJob(entry)
                 changed = true
             } else {
-                val valueChanged = existing.value !== item.value
-                existing.value = item.value
+                val valueChanged = existing.value !== value
+                existing.value = value
                 rebuilt[id] = existing
                 if (valueChanged || forceRepost) {
                     sink.post(id, existing.value, existing.state)

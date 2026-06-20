@@ -30,13 +30,13 @@ internal const val EXTRA_ACTION_KEY = "deltalist.actionKey"
  * so interactions only route to a live notifier.
  */
 internal object NotifierRegistry {
-    private val notifiers = ConcurrentHashMap<String, DeltaNotifier<*>>()
+    private val notifiers = ConcurrentHashMap<String, DeltaNotifier<*, *>>()
 
-    fun register(tag: String, notifier: DeltaNotifier<*>) {
+    fun register(tag: String, notifier: DeltaNotifier<*, *>) {
         notifiers[tag] = notifier
     }
 
-    fun unregister(tag: String, notifier: DeltaNotifier<*>) {
+    fun unregister(tag: String, notifier: DeltaNotifier<*, *>) {
         notifiers.remove(tag, notifier)
     }
 

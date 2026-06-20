@@ -35,7 +35,7 @@ class NotificationScope<T> internal constructor(
             .setContentIntent(pendingIntent(NotificationInteraction.Type.ContentTap, null))
             .setDeleteIntent(pendingIntent(NotificationInteraction.Type.Dismiss, null))
 
-        config.group?.let { builder.setGroup(it.key) }
+        config.groupKey?.let { builder.setGroup(it) }
         builder.body()
         return builder.build()
     }

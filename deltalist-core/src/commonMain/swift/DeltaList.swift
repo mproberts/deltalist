@@ -31,6 +31,68 @@ import Combine
     var sections: [Any] { get }
 }
 
+// MARK: - Cross-framework runtime selectors + IMP cache
+//
+// The runtime-selector path (the helpers at the bottom of this file, plus the UIKit data source and
+// the notifier) invokes the exported Kotlin accessors by Obj-C selector. Selectors come from
+// `#selector` against the @objc protocols that already declare these members — `DeltaProtocol` for
+// the flat accessors and the selector-only `SectionedDeltaRuntimeABI` for the sectioned ones — so a
+// rename of a bridged signature is a compile error instead of a silent runtime miss, and each
+// selector is interned once at load rather than rebuilt from a String on every call.
+//
+// Resolved IMPs are cached per (class, selector): a `Delta` *instance* is replaced on every emission
+// but its Obj-C *class* is stable, so the responds(to:)/class_getInstanceMethod walk runs once per
+// class and a hot per-row call (isLoaded/loadedItem) becomes a dictionary hit plus a C call.
+
+/// Selector-only mirror of the sectioned Kotlin accessors that aren't on `SectionedDeltaProtocol`.
+/// Nothing conforms to it; it exists solely so `#selector` can derive checked selectors for them.
+@objc private protocol SectionedDeltaRuntimeABI {
+    func sectionCount() -> Int32
+    func getHeaderAt(sectionIndex: Int32) -> Any?
+    func getItemCountAt(sectionIndex: Int32) -> Int32
+    func getItemAt(sectionIndex: Int32, itemIndex: Int32) -> Any?
+}
+
+/// Compile-time-checked selectors for the exported Kotlin `Delta` / `SectionedDelta` accessors.
+enum DeltaSelector {
+    static let loadedItems = #selector(DeltaProtocol.loadedItems)
+    static let totalSize = #selector(DeltaProtocol.totalSize)
+    static let change = #selector(getter: DeltaProtocol.change)
+    static let isLoadedAt = #selector(DeltaProtocol.isLoadedAt(index:))
+    static let getLoadedItemAt = #selector(DeltaProtocol.getLoadedItemAt(index:))
+    static let triggerLoadAt = #selector(DeltaProtocol.triggerLoadAt(index:))
+    static let sectionCount = #selector(SectionedDeltaRuntimeABI.sectionCount)
+    static let getHeaderAt = #selector(SectionedDeltaRuntimeABI.getHeaderAt(sectionIndex:))
+    static let getItemCountAt = #selector(SectionedDeltaRuntimeABI.getItemCountAt(sectionIndex:))
+    static let getItemAt = #selector(SectionedDeltaRuntimeABI.getItemAt(sectionIndex:itemIndex:))
+}
+
+/// Caches resolved Obj-C IMPs keyed by (class, selector) for the cross-framework runtime path.
+/// A nil entry records "this class does not respond", so negatives are cached too.
+final class DeltaIMPCache: @unchecked Sendable {
+    static let shared = DeltaIMPCache()
+
+    private struct Key: Hashable {
+        let cls: ObjectIdentifier
+        let sel: Selector
+    }
+    private let lock = NSLock()
+    private var cache: [Key: IMP?] = [:]
+
+    func imp(for obj: AnyObject, _ sel: Selector) -> IMP? {
+        let cls: AnyClass = type(of: obj)
+        let key = Key(cls: ObjectIdentifier(cls), sel: sel)
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached = cache[key] { return cached }
+        let resolved = obj.responds(to: sel)
+            ? class_getInstanceMethod(cls, sel).map(method_getImplementation)
+            : nil
+        cache[key] = resolved
+        return resolved
+    }
+}
+
 // MARK: - DeltaList
 
 /// Observable binding for a Kotlin `Flow<Delta<T>>`. A single wrapper that serves both
@@ -103,7 +165,7 @@ public final class DeltaList<T: AnyObject>: ObservableObject {
     public func isLoaded(at index: Int) -> Bool {
         if let delta = currentDelta as? Delta<T> { return delta.isLoadedAt(index: Int32(index)) }
         if let delta = currentDelta as? Delta<AnyObject> { return delta.isLoadedAt(index: Int32(index)) }
-        if let delta = currentDelta, delta.responds(to: Selector(("isLoadedAtIndex:"))) {
+        if let delta = currentDelta, DeltaIMPCache.shared.imp(for: delta, DeltaSelector.isLoadedAt) != nil {
             return isLoadedAtViaRuntime(delta, index: Int32(index))
         }
         return index < loadedItems.count
@@ -113,7 +175,7 @@ public final class DeltaList<T: AnyObject>: ObservableObject {
     public func loadedItem(at index: Int) -> T? {
         if let delta = currentDelta as? Delta<T> { return delta.getLoadedItemAt(index: Int32(index)) as? T }
         if let delta = currentDelta as? Delta<AnyObject> { return delta.getLoadedItemAt(index: Int32(index)) as? T }
-        if let delta = currentDelta, delta.responds(to: Selector(("getLoadedItemAtIndex:"))) {
+        if let delta = currentDelta, DeltaIMPCache.shared.imp(for: delta, DeltaSelector.getLoadedItemAt) != nil {
             return loadedItemAtViaRuntime(delta, index: Int32(index)) as? T
         }
         return index < loadedItems.count ? loadedItems[index] : nil
@@ -124,7 +186,7 @@ public final class DeltaList<T: AnyObject>: ObservableObject {
     public func triggerLoad(at index: Int) {
         if let delta = currentDelta as? Delta<T> { delta.triggerLoadAt(index: Int32(index)); return }
         if let delta = currentDelta as? Delta<AnyObject> { delta.triggerLoadAt(index: Int32(index)); return }
-        if let delta = currentDelta, delta.responds(to: Selector(("triggerLoadAtIndex:"))) {
+        if let delta = currentDelta, DeltaIMPCache.shared.imp(for: delta, DeltaSelector.triggerLoadAt) != nil {
             triggerLoadAtViaRuntime(delta, index: Int32(index))
         }
     }
@@ -320,44 +382,44 @@ public final class SectionedDeltaList<H: AnyObject, T: AnyObject>: ObservableObj
 
 private func loadedItemsViaRuntime(_ obj: AnyObject) -> [Any] {
     typealias Fn = @convention(c) (AnyObject, Selector) -> NSArray?
-    let sel = Selector(("loadedItems"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return [] }
-    return (unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel) as? [Any]) ?? []
+    let sel = DeltaSelector.loadedItems
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return [] }
+    return (unsafeBitCast(imp, to: Fn.self)(obj, sel) as? [Any]) ?? []
 }
 
 private func totalSizeViaRuntime(_ obj: AnyObject) -> Int {
     typealias Fn = @convention(c) (AnyObject, Selector) -> Int32
-    let sel = Selector(("totalSize"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return 0 }
-    return Int(unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel))
+    let sel = DeltaSelector.totalSize
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return 0 }
+    return Int(unsafeBitCast(imp, to: Fn.self)(obj, sel))
 }
 
 private func changeViaRuntime(_ obj: AnyObject) -> AnyObject? {
     typealias Fn = @convention(c) (AnyObject, Selector) -> AnyObject?
-    let sel = Selector(("change"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return nil }
-    return unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel)
+    let sel = DeltaSelector.change
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return nil }
+    return unsafeBitCast(imp, to: Fn.self)(obj, sel)
 }
 
 private func isLoadedAtViaRuntime(_ obj: AnyObject, index: Int32) -> Bool {
     typealias Fn = @convention(c) (AnyObject, Selector, Int32) -> Bool
-    let sel = Selector(("isLoadedAtIndex:"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return false }
-    return unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel, index)
+    let sel = DeltaSelector.isLoadedAt
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return false }
+    return unsafeBitCast(imp, to: Fn.self)(obj, sel, index)
 }
 
 private func loadedItemAtViaRuntime(_ obj: AnyObject, index: Int32) -> Any? {
     typealias Fn = @convention(c) (AnyObject, Selector, Int32) -> AnyObject?
-    let sel = Selector(("getLoadedItemAtIndex:"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return nil }
-    return unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel, index)
+    let sel = DeltaSelector.getLoadedItemAt
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return nil }
+    return unsafeBitCast(imp, to: Fn.self)(obj, sel, index)
 }
 
 private func triggerLoadAtViaRuntime(_ obj: AnyObject, index: Int32) {
     typealias Fn = @convention(c) (AnyObject, Selector, Int32) -> Void
-    let sel = Selector(("triggerLoadAtIndex:"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return }
-    unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel, index)
+    let sel = DeltaSelector.triggerLoadAt
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return }
+    unsafeBitCast(imp, to: Fn.self)(obj, sel, index)
 }
 
 // MARK: - Sectioned runtime-selector helpers
@@ -368,35 +430,35 @@ private func triggerLoadAtViaRuntime(_ obj: AnyObject, index: Int32) {
 
 private func sectionCountViaRuntime(_ obj: AnyObject) -> Int {
     typealias Fn = @convention(c) (AnyObject, Selector) -> Int32
-    let sel = Selector(("sectionCount"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return 0 }
-    return Int(unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel))
+    let sel = DeltaSelector.sectionCount
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return 0 }
+    return Int(unsafeBitCast(imp, to: Fn.self)(obj, sel))
 }
 
 private func sectionedChangeViaRuntime(_ obj: AnyObject) -> AnyObject? {
     typealias Fn = @convention(c) (AnyObject, Selector) -> AnyObject?
-    let sel = Selector(("change"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return nil }
-    return unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel)
+    let sel = DeltaSelector.change
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return nil }
+    return unsafeBitCast(imp, to: Fn.self)(obj, sel)
 }
 
 private func headerViaRuntime(_ obj: AnyObject, sectionIndex: Int32) -> Any? {
     typealias Fn = @convention(c) (AnyObject, Selector, Int32) -> AnyObject?
-    let sel = Selector(("getHeaderAtSectionIndex:"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return nil }
-    return unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel, sectionIndex)
+    let sel = DeltaSelector.getHeaderAt
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return nil }
+    return unsafeBitCast(imp, to: Fn.self)(obj, sel, sectionIndex)
 }
 
 private func itemCountViaRuntime(_ obj: AnyObject, sectionIndex: Int32) -> Int {
     typealias Fn = @convention(c) (AnyObject, Selector, Int32) -> Int32
-    let sel = Selector(("getItemCountAtSectionIndex:"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return 0 }
-    return Int(unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel, sectionIndex))
+    let sel = DeltaSelector.getItemCountAt
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return 0 }
+    return Int(unsafeBitCast(imp, to: Fn.self)(obj, sel, sectionIndex))
 }
 
 private func itemViaRuntime(_ obj: AnyObject, sectionIndex: Int32, itemIndex: Int32) -> Any? {
     typealias Fn = @convention(c) (AnyObject, Selector, Int32, Int32) -> AnyObject?
-    let sel = Selector(("getItemAtSectionIndex:itemIndex:"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return nil }
-    return unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel, sectionIndex, itemIndex)
+    let sel = DeltaSelector.getItemAt
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return nil }
+    return unsafeBitCast(imp, to: Fn.self)(obj, sel, sectionIndex, itemIndex)
 }

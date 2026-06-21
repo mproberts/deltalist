@@ -556,7 +556,7 @@ private func applyErasedDelta(_ value: AnyObject, to controller: TrayController)
     } else if let delta = value as? DeltaProtocol {
         controller.applyDelta(items: delta.loadedItems().map { $0 as AnyObject },
                               isReload: delta.change is Change.Reload)
-    } else if value.responds(to: Selector(("loadedItems"))) {
+    } else if value.responds(to: DeltaSelector.loadedItems) {
         // A Delta vended by a *different* SKIE framework (e.g. the app's own KMP framework exporting
         // deltalist-core) is a DISTINCT Obj-C class, and the @objc DeltaProtocol is module-qualified,
         // so neither the typed casts nor the protocol cast match it. Call the exported Kotlin
@@ -572,9 +572,9 @@ private func applyErasedDelta(_ value: AnyObject, to controller: TrayController)
 @available(iOS 14.0, *)
 private func loadedItemsViaRuntime(_ obj: AnyObject) -> [AnyObject] {
     typealias Fn = @convention(c) (AnyObject, Selector) -> AnyObject?
-    let sel = Selector(("loadedItems"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return [] }
-    let result = unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel)
+    let sel = DeltaSelector.loadedItems
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return [] }
+    let result = unsafeBitCast(imp, to: Fn.self)(obj, sel)
     return (result as? [AnyObject]) ?? []
 }
 
@@ -583,9 +583,9 @@ private func loadedItemsViaRuntime(_ obj: AnyObject) -> [AnyObject] {
 @available(iOS 14.0, *)
 private func changeIsReloadViaRuntime(_ obj: AnyObject) -> Bool {
     typealias Fn = @convention(c) (AnyObject, Selector) -> AnyObject?
-    let sel = Selector(("change"))
-    guard obj.responds(to: sel), let m = class_getInstanceMethod(type(of: obj), sel) else { return false }
-    guard let change = unsafeBitCast(method_getImplementation(m), to: Fn.self)(obj, sel) else { return false }
+    let sel = DeltaSelector.change
+    guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return false }
+    guard let change = unsafeBitCast(imp, to: Fn.self)(obj, sel) else { return false }
     return String(describing: type(of: change)).contains("ChangeReload")
 }
 

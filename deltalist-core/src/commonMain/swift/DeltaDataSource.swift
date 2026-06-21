@@ -681,66 +681,41 @@ public class SectionedDeltaCollectionDataSource<H: AnyObject, T: AnyObject>: NSO
     /// Call sectionCount via ObjC runtime for Int32 return type
     private func callSectionCountViaRuntime(_ obj: AnyObject) -> Int {
         typealias MethodType = @convention(c) (AnyObject, Selector) -> Int32
-        let sel = Selector(("sectionCount"))
-        guard obj.responds(to: sel),
-              let method = class_getInstanceMethod(type(of: obj), sel) else {
-            return 0
-        }
-        let imp = method_getImplementation(method)
-        let fn = unsafeBitCast(imp, to: MethodType.self)
-        return Int(fn(obj, sel))
+        let sel = DeltaSelector.sectionCount
+        guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return 0 }
+        return Int(unsafeBitCast(imp, to: MethodType.self)(obj, sel))
     }
 
     /// Call change property via ObjC runtime
     private func callGetChange(_ obj: AnyObject) -> SectionedChange? {
         typealias MethodType = @convention(c) (AnyObject, Selector) -> AnyObject?
-        let sel = Selector(("change"))
-        guard obj.responds(to: sel),
-              let method = class_getInstanceMethod(type(of: obj), sel) else {
-            return nil
-        }
-        let imp = method_getImplementation(method)
-        let fn = unsafeBitCast(imp, to: MethodType.self)
-        return fn(obj, sel) as? SectionedChange
+        let sel = DeltaSelector.change
+        guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return nil }
+        return unsafeBitCast(imp, to: MethodType.self)(obj, sel) as? SectionedChange
     }
 
     /// Call getHeaderAt via ObjC runtime
     private func callGetHeaderAt(_ obj: AnyObject, sectionIndex: Int32) -> Any? {
         typealias MethodType = @convention(c) (AnyObject, Selector, Int32) -> AnyObject?
-        let sel = Selector(("getHeaderAtSectionIndex:"))
-        guard obj.responds(to: sel),
-              let method = class_getInstanceMethod(type(of: obj), sel) else {
-            return nil
-        }
-        let imp = method_getImplementation(method)
-        let fn = unsafeBitCast(imp, to: MethodType.self)
-        return fn(obj, sel, sectionIndex)
+        let sel = DeltaSelector.getHeaderAt
+        guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return nil }
+        return unsafeBitCast(imp, to: MethodType.self)(obj, sel, sectionIndex)
     }
 
     /// Call getItemCountAt via ObjC runtime
     private func callGetItemCountAt(_ obj: AnyObject, sectionIndex: Int32) -> Int {
         typealias MethodType = @convention(c) (AnyObject, Selector, Int32) -> Int32
-        let sel = Selector(("getItemCountAtSectionIndex:"))
-        guard obj.responds(to: sel),
-              let method = class_getInstanceMethod(type(of: obj), sel) else {
-            return 0
-        }
-        let imp = method_getImplementation(method)
-        let fn = unsafeBitCast(imp, to: MethodType.self)
-        return Int(fn(obj, sel, sectionIndex))
+        let sel = DeltaSelector.getItemCountAt
+        guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return 0 }
+        return Int(unsafeBitCast(imp, to: MethodType.self)(obj, sel, sectionIndex))
     }
 
     /// Call getItemAt via ObjC runtime
     private func callGetItemAt(_ obj: AnyObject, sectionIndex: Int32, itemIndex: Int32) -> Any? {
         typealias MethodType = @convention(c) (AnyObject, Selector, Int32, Int32) -> AnyObject?
-        let sel = Selector(("getItemAtSectionIndex:itemIndex:"))
-        guard obj.responds(to: sel),
-              let method = class_getInstanceMethod(type(of: obj), sel) else {
-            return nil
-        }
-        let imp = method_getImplementation(method)
-        let fn = unsafeBitCast(imp, to: MethodType.self)
-        return fn(obj, sel, sectionIndex, itemIndex)
+        let sel = DeltaSelector.getItemAt
+        guard let imp = DeltaIMPCache.shared.imp(for: obj, sel) else { return nil }
+        return unsafeBitCast(imp, to: MethodType.self)(obj, sel, sectionIndex, itemIndex)
     }
 
     private func applyChanges(newSections: [SectionData], change: SectionedChange) {
@@ -1059,18 +1034,18 @@ public class StableDeltaCollectionDataSource<T: AnyObject>: NSObject, UICollecti
         // Cross-module fallback: access Delta properties directly
         // Delta is a Kotlin class, so we can call its methods
         guard let deltaBase = delta as? Delta<NSObject> else {
-            // Last resort: try to extract via method calls if it's some Delta variant
-            if delta.responds(to: Selector(("loadedItems"))) {
-                if let loadedArray = delta.perform(Selector(("loadedItems")))?.takeUnretainedValue() as? [AnyObject] {
-                    items = loadedArray.compactMap { $0 as? T }
-                    itemsByStableId = Dictionary(uniqueKeysWithValues: items.map { (stableIdExtractor($0), $0) })
-                    onItemsChanged?(items)
+            // Last resort: a Delta vended by another SKIE framework — call loadedItems() by selector.
+            typealias Fn = @convention(c) (AnyObject, Selector) -> NSArray?
+            if let imp = DeltaIMPCache.shared.imp(for: delta, DeltaSelector.loadedItems),
+               let loadedArray = unsafeBitCast(imp, to: Fn.self)(delta, DeltaSelector.loadedItems) as? [AnyObject] {
+                items = loadedArray.compactMap { $0 as? T }
+                itemsByStableId = Dictionary(uniqueKeysWithValues: items.map { (stableIdExtractor($0), $0) })
+                onItemsChanged?(items)
 
-                    var snapshot = NSDiffableDataSourceSnapshot<Int, Int32>()
-                    snapshot.appendSections([0])
-                    snapshot.appendItems(items.map { stableIdExtractor($0) }, toSection: 0)
-                    diffableDataSource.apply(snapshot, animatingDifferences: false)
-                }
+                var snapshot = NSDiffableDataSourceSnapshot<Int, Int32>()
+                snapshot.appendSections([0])
+                snapshot.appendItems(items.map { stableIdExtractor($0) }, toSection: 0)
+                diffableDataSource.apply(snapshot, animatingDifferences: false)
             }
             return
         }

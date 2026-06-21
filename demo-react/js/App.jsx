@@ -1,10 +1,25 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { useDeltaList, useFlow } from 'demo-core';
+import { List, AutoSizer } from 'react-virtualized';
+import { useDeltaList, useSoftDeltaList, useFlow } from 'demo-core';
 
 // --- Basic List Demo ---
 
+// Observes a single ticking item's live tick count via its Kotlin StateFlow.
+function TickingItemRow({ item, index, selected, onSelect }) {
+    const ticks = useFlow(item.tickCount, 0);
+    return (
+        <li
+            className={`item-card ${selected ? 'selected' : ''}`}
+            onClick={() => onSelect(index)}
+        >
+            <span className="item-title">{item.title}</span>
+            <span className="item-id">Ticks: {ticks} | StableId: {item.stableId}</span>
+        </li>
+    );
+}
+
 function BasicListDemo({ vm }) {
-    const items = useDeltaList(vm.items);
+    const items = useFlow(vm.tickingItems, []);
     const [selectedIndex, setSelectedIndex] = useState(-1);
 
     return (
@@ -23,14 +38,13 @@ function BasicListDemo({ vm }) {
             )}
             <ul className="item-list">
                 {items.map((item, index) => (
-                    <li
-                        key={item.id}
-                        className={`item-card ${index === selectedIndex ? 'selected' : ''}`}
-                        onClick={() => setSelectedIndex(index === selectedIndex ? -1 : index)}
-                    >
-                        <span className="item-title">{item.title}</span>
-                        <span className="item-id">ID: {item.id.substring(0, 8)}...</span>
-                    </li>
+                    <TickingItemRow
+                        key={item.stableId}
+                        item={item}
+                        index={index}
+                        selected={index === selectedIndex}
+                        onSelect={(i) => setSelectedIndex(i === selectedIndex ? -1 : i)}
+                    />
                 ))}
             </ul>
             {items.length === 0 && <div className="empty-state">No items. Click "Add" to get started.</div>}
@@ -97,27 +111,51 @@ function SectionedListDemo({ vm }) {
 
 // --- Paginated List Demo ---
 
+const PAGINATED_ROW_HEIGHT = 52;
+
+// A not-yet-loaded row. Triggers the fetch on appear (mirrors iOS .onAppear /
+// Android's soft.request() in the row body). Because the list is virtualized, only
+// rows scrolled into view mount, so only visible placeholders drive pagination.
+function PaginatedLoadingRow({ index, request }) {
+    useEffect(() => {
+        if (request) request();
+    }, [request]);
+    return (
+        <div className="item-card placeholder">
+            <span className="item-title placeholder-text">Loading...</span>
+            <span className="item-id">index: {index}</span>
+        </div>
+    );
+}
+
 function PaginatedListDemo({ vm }) {
-    const items = useDeltaList(vm.items);
+    const list = useSoftDeltaList(vm.items);
     const loadingDirection = useFlow(vm.loadingDirection, null);
     const loadedCount = useFlow(vm.loadedCount, 0);
     const excludeDivisors = useFlow(vm.excludeDivisors, []);
-    const sentinelRef = useRef(null);
+    const listRef = useRef(null);
 
-    const hasMore = loadedCount < 10000;
-
-    // Trigger loading when the sentinel element becomes visible
+    // react-virtualized caches rendered cells; re-render the visible window whenever a
+    // new delta snapshot arrives so loaded values replace their placeholders.
     useEffect(() => {
-        const el = sentinelRef.current;
-        if (!el) return;
-        const observer = new IntersectionObserver(([entry]) => {
-            if (entry.isIntersecting) {
-                vm.requestMore();
-            }
-        }, { threshold: 0 });
-        observer.observe(el);
-        return () => observer.disconnect();
-    }, [vm, items.length]);
+        if (listRef.current) listRef.current.forceUpdateGrid();
+    }, [list]);
+
+    const rowRenderer = useCallback(({ index, key, style }) => {
+        const cell = list.get(index);
+        return (
+            <div key={key} style={style}>
+                {cell.loaded ? (
+                    <div className="item-card">
+                        <span className="item-title">#{cell.value}</span>
+                        <span className="item-id">index: {index}</span>
+                    </div>
+                ) : (
+                    <PaginatedLoadingRow index={index} request={cell.request} />
+                )}
+            </div>
+        );
+    }, [list]);
 
     const divisors = [2, 3, 5, 7, 11];
 
@@ -128,21 +166,23 @@ function PaginatedListDemo({ vm }) {
                 {loadingDirection && <span className="loading-badge">Loading: {loadingDirection}</span>}
             </div>
             <div className="status-bar">
-                <span>Loaded: {loadedCount} | Showing: {items.length}</span>
+                <span>Loaded: {loadedCount} | Filtered: {list.loadedCount} | Total: {list.size}</span>
             </div>
-            <ul className="item-list paginated-list">
-                {items.map((item, index) => (
-                    <li key={index} className="item-card">
-                        <span className="item-title">#{item}</span>
-                        <span className="item-id">index: {index}</span>
-                    </li>
-                ))}
-                {hasMore && (
-                    <li ref={sentinelRef} className="item-card placeholder">
-                        <span className="item-title placeholder-text">Loading more...</span>
-                    </li>
-                )}
-            </ul>
+            <div className="paginated-virtual-list">
+                <AutoSizer>
+                    {({ width, height }) => (
+                        <List
+                            ref={listRef}
+                            width={width}
+                            height={height}
+                            rowCount={list.size}
+                            rowHeight={PAGINATED_ROW_HEIGHT}
+                            rowRenderer={rowRenderer}
+                            overscanRowCount={5}
+                        />
+                    )}
+                </AutoSizer>
+            </div>
             <div className="filter-bar">
                 <span>Exclude divisors of:</span>
                 {divisors.map(d => (

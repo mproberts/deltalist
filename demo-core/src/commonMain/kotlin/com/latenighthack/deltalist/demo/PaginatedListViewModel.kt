@@ -32,7 +32,7 @@ class PaginatedListViewModel {
             delay(500)
 
             val pageSize = 20
-            val totalItems = 10_000
+            val totalItems = 2_000
             val startIndex = pageToken * pageSize
             val endIndex = minOf(startIndex + pageSize, totalItems)
 

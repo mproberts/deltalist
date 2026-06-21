@@ -1,14 +1,17 @@
 package com.latenighthack.deltalist.demo
 
 import com.latenighthack.deltalist.DragState
+import com.latenighthack.deltalist.LazyList
+import com.latenighthack.deltalist.SoftList
 import com.latenighthack.deltalist.SoftValue
+import com.latenighthack.deltalist.StableItem
+import com.latenighthack.deltalist.acquireOrGet
 import com.latenighthack.deltalist.operators.mapItems
-import com.latenighthack.deltalist.softGetOrNull
 import com.latenighthack.deltalist.softLoadedCount
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 
 private fun Item.toJs(): dynamic {
@@ -69,6 +72,59 @@ class JsListViewModel {
 
     val items: Any = vm.items.mapItems { it.toJs() }
 
+    // Lazy ticking items, mirroring the Android/iOS adapters. Each delta acquires the
+    // loaded StableItem<TickingItem>s (which starts/retains their per-item tick loops) and
+    // emits plain JS rows { stableId, title, tickCount }, where tickCount is the live
+    // StateFlow the React row observes via useFlow. Items that leave the list are stopped.
+    val tickingItems: Any = tickingItemsFlow()
+
+    private fun tickingItemsFlow() = flow {
+        // stableId -> (current index, acquired item)
+        val held = LinkedHashMap<Int, Pair<Int, StableItem<TickingItem>>>()
+        var lastList: SoftList<StableItem<TickingItem>>? = null
+        try {
+            vm.tickingItems.collect { delta ->
+                val list = delta.items
+                lastList = list
+                @Suppress("UNCHECKED_CAST")
+                val lazy = list as? LazyList<StableItem<TickingItem>>
+                val loaded = list.softLoadedCount()
+                val newHeld = LinkedHashMap<Int, Pair<Int, StableItem<TickingItem>>>()
+                val rows = ArrayList<Any?>(loaded)
+                for (i in 0 until loaded) {
+                    val soft = list.acquireOrGet(i)
+                    if (soft is SoftValue.Present) {
+                        val stable = soft.value
+                        val sid = stable.stableId
+                        // Persisting items already carry a refcount across deltas; release the
+                        // extra acquire so every held item stays at exactly one acquirer.
+                        if (held.containsKey(sid)) lazy?.release(i)
+                        newHeld[sid] = i to stable
+                        val obj: dynamic = js("({})")
+                        obj.stableId = sid
+                        obj.title = stable.value.item.title
+                        obj.tickCount = stable.value.tickCount
+                        rows.add(obj)
+                    }
+                }
+                // Stop ticking for items that left the list.
+                for ((sid, entry) in held) {
+                    if (!newHeld.containsKey(sid)) entry.second.value.stop()
+                }
+                held.clear()
+                held.putAll(newHeld)
+                emit(rows.toTypedArray())
+            }
+        } finally {
+            @Suppress("UNCHECKED_CAST")
+            val lazy = lastList as? LazyList<StableItem<TickingItem>>
+            for ((_, entry) in held) {
+                lazy?.release(entry.first)
+                entry.second.value.stop()
+            }
+        }
+    }
+
     fun addItem() = vm.addItem()
     fun removeItem(index: Int) = vm.removeItem(index)
     fun insertBefore(index: Int) = vm.insertBefore(index)
@@ -97,25 +153,13 @@ class JsSectionedListViewModel {
 @JsExport
 class JsPaginatedListViewModel {
     private val vm = PaginatedListViewModel()
-    private var latestItems: com.latenighthack.deltalist.SoftList<Any?>? = null
 
-    @Suppress("UNCHECKED_CAST")
-    val items: Any = vm.paginatedNumbers.onEach { delta ->
-        latestItems = delta.items as com.latenighthack.deltalist.SoftList<Any?>
-    }
+    // The raw delta flow; useSoftDeltaList exposes its full soft list (placeholders included)
+    // so the React rows drive fetches via each placeholder's request(), like iOS/Android.
+    val items: Any = vm.paginatedNumbers
     val loadingDirection: Any = vm.paginatedLoadingDirection.map { it?.name?.lowercase() }
     val loadedCount: Any = vm.paginatedLoadedCount
     val excludeDivisors: Any = vm.excludeDivisors.map { it.toTypedArray() }
-
-    fun requestMore() {
-        val items = latestItems ?: return
-        val loaded = items.softLoadedCount()
-        if (loaded >= items.size) return
-        val soft = items.softGetOrNull(loaded)
-        if (soft is SoftValue.NotLoaded) {
-            soft.request()
-        }
-    }
 
     fun toggleDivisorFilter(divisor: Int) = vm.toggleDivisorFilter(divisor)
 }

@@ -1,1 +1,1 @@
-export { useDeltaList, useFlow } from 'deltalist-react';
+export { useDeltaList, useSoftDeltaList, useFlow } from 'deltalist-react';

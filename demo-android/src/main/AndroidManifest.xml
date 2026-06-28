@@ -36,6 +36,10 @@
             android:exported="false"
             android:theme="@style/Theme.DeltaListDemo" />
         <activity
+            android:name=".SortedListActivity"
+            android:exported="false"
+            android:theme="@style/Theme.DeltaListDemo" />
+        <activity
             android:name=".DragDropActivity"
             android:exported="false"
             android:theme="@style/Theme.DeltaListDemo" />

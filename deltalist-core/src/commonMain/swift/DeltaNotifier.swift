@@ -617,7 +617,7 @@ public final class DeltaNotificationRouter: NSObject, UNUserNotificationCenterDe
         let registration = Registration(
             presentation: notifier.foregroundPresentation,
             dispatch: { [weak notifier] interaction in
-                Task { @MainActor in _ = notifier?.dispatch(interaction) }
+                Task { @MainActor [notifier] in _ = notifier?.dispatch(interaction) }
             }
         )
         lock.lock(); registrations[notifier.idSpaceTag] = registration; lock.unlock()

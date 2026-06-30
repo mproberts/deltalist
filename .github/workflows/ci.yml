@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  jvm-js-android:
+    name: JVM + JS tests, Android/JS assembly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run common tests on JVM
+        run: ./gradlew :deltalist-core:jvmTest --stacktrace
+
+      - name: Run common tests on JS (node)
+        run: ./gradlew :deltalist-core:jsNodeTest --stacktrace
+
+      - name: Run Android binding unit tests
+        run: ./gradlew :deltalist-android-notifications:testDebugUnitTest :deltalist-android-recyclerview:testDebugUnitTest :deltalist-android-compose:testDebugUnitTest --stacktrace
+
+      - name: Assemble Android library modules
+        run: ./gradlew :deltalist-android-recyclerview:assembleRelease :deltalist-android-compose:assembleRelease :deltalist-android-notifications:assembleRelease --stacktrace
+
+      - name: Compile JS / React module
+        run: ./gradlew :deltalist-react:compileKotlinJs --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jvm-js-test-reports
+          path: '**/build/reports/tests/**'
+          if-no-files-found: ignore
+
+  ios:
+    name: iOS tests + XCFramework
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run common tests on iOS simulator
+        run: ./gradlew :deltalist-core:iosSimulatorArm64Test --stacktrace
+
+      - name: Assemble release XCFramework
+        run: ./gradlew :deltalist-core:assembleDeltaListCoreReleaseXCFramework --stacktrace
+
+      - name: Upload iOS test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-reports
+          path: '**/build/reports/tests/**'
+          if-no-files-found: ignore

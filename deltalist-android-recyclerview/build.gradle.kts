@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.maven.publish)
 }
 
 android {
@@ -22,7 +23,7 @@ android {
 }
 
 dependencies {
-    implementation(project(":deltalist-core"))
+    api(project(":deltalist-core"))
 
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.lifecycle.runtime.ktx)

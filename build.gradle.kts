@@ -4,11 +4,13 @@ plugins {
     alias(libs.plugins.kotlin.android) apply false
     alias(libs.plugins.kotlin.multiplatform) apply false
     alias(libs.plugins.compose.compiler) apply false
+    alias(libs.plugins.maven.publish) apply false
 }
 
-// Establish publishing coordinates. Actual publish wiring (maven-publish / signing /
-// npm / SPM) is intentionally deferred; these just give every module a group + version.
+// Published modules derive their coordinates from GROUP / VERSION_NAME in
+// gradle.properties (consumed by the maven-publish plugin). The values below keep
+// the demo modules (which are not published) on the same group + version.
 allprojects {
-    group = "com.latenighthack.deltalist"
-    version = "0.1.0"
+    group = providers.gradleProperty("GROUP").get()
+    version = providers.gradleProperty("VERSION_NAME").get()
 }

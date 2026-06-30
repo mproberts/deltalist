@@ -10,6 +10,7 @@ core = "1.13.1"
 reorderable = "2.4.3"
 skie = "0.10.9"
 kotlin-wrappers-bom = "2025.6.9"
+maven-publish = "0.30.0"
 
 [libraries]
 kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
@@ -53,3 +54,4 @@ kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 skie = { id = "co.touchlab.skie", version.ref = "skie" }
+maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "maven-publish" }
